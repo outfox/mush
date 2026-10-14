@@ -17,18 +17,17 @@ import dev.twodog.mush.host.SpikeHost
 import java.awt.BorderLayout
 import java.awt.Canvas
 import java.awt.Color
+import java.awt.Dimension
+import java.awt.Graphics
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
-import java.awt.event.HierarchyBoundsAdapter
 import java.awt.event.HierarchyEvent
 import java.beans.PropertyChangeListener
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Base64
 import javax.swing.JComponent
-import javax.swing.JLayeredPane
 import javax.swing.JPanel
-import javax.swing.JRootPane
 import javax.swing.SwingUtilities
 import javax.swing.Timer
 
@@ -36,9 +35,10 @@ import javax.swing.Timer
  * The viewport half of the scene editor: a spike host's Godot window embedded as a child of a heavyweight Canvas.
  * Unsaved document text is pushed to the host on a short debounce.
  *
- * The Canvas does not live inside the editor tab. Editor tabs remove hidden tab components from the hierarchy, which
- * would destroy the Canvas HWND on every tab switch. Instead the tab holds a lightweight placeholder, and the Canvas
- * sits in the window's layered pane over the placeholder's visible area, hidden while the placeholder is not shown.
+ * Editor tabs collapse a tab being hidden to (0, 0, 0, 0) and remove it from the hierarchy once focus settles,
+ * which would destroy the Canvas HWND on every tab switch. On collapse, the Canvas steps out into the window's
+ * layered pane through `setComponentZOrder`, which moves a heavyweight without recreating its peer, and steps back
+ * in the same way when the tab shows again.
  */
 class SceneViewportEditor(private val file: VirtualFile, private val document: Document) : UserDataHolderBase(), FileEditor {
     private val resPath = GodotProject.resPath(file)!!
@@ -46,29 +46,27 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
     private val host = SpikeHost(::onReply)
     private val reloadAlarm = Alarm(Alarm.ThreadToUse.POOLED_THREAD, this)
     private val canvas = HostCanvas()
-    private val placeholder = JPanel()
+    private val placeholder = JPanel(BorderLayout())
     private val status = JBLabel(" ")
     private val panel = JPanel(BorderLayout())
-    private val syncTimer = Timer(100) { updateOverlay() }
-    private var overlayRoot: JRootPane? = null
+    private val syncTimer = Timer(100) { update() }
 
     init {
-        canvas.background = Color.DARK_GRAY
-        canvas.ignoreRepaint = true
-        canvas.isVisible = false
-
-        placeholder.background = Color.DARK_GRAY
-        placeholder.addHierarchyListener { e ->
-            if (e.changeFlags and (HierarchyEvent.SHOWING_CHANGED or HierarchyEvent.PARENT_CHANGED).toLong() != 0L)
-                updateOverlay()
-        }
-        placeholder.addHierarchyBoundsListener(object : HierarchyBoundsAdapter() {
-            override fun ancestorMoved(e: HierarchyEvent) = updateOverlay()
-            override fun ancestorResized(e: HierarchyEvent) = updateOverlay()
+        // A heavyweight's minimum size defaults to its current size, which pins the editor splitter.
+        canvas.minimumSize = Dimension(0, 0)
+        canvas.preferredSize = JBUI.size(320, 240)
+        canvas.addComponentListener(object : ComponentAdapter() {
+            override fun componentResized(e: ComponentEvent) = update()
         })
+
+        placeholder.background = GODOT_CLEAR_COLOR
+        placeholder.add(canvas, BorderLayout.CENTER)
+        placeholder.addHierarchyListener { e ->
+            if (e.changeFlags and HierarchyEvent.SHOWING_CHANGED.toLong() != 0L)
+                update()
+        }
         placeholder.addComponentListener(object : ComponentAdapter() {
-            override fun componentResized(e: ComponentEvent) = updateOverlay()
-            override fun componentMoved(e: ComponentEvent) = updateOverlay()
+            override fun componentResized(e: ComponentEvent) = update()
         })
 
         panel.add(placeholder, BorderLayout.CENTER)
@@ -86,13 +84,19 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         syncTimer.start()
     }
 
-    /** The Canvas HWND is recreated only when the editor moves to another IDE window; the Godot window steps out first. */
+    /** Paints Godot's default clear colour, so a frame where the child lags behind a resize does not flash. */
     private inner class HostCanvas : Canvas() {
+        override fun paint(g: Graphics) {
+            g.color = GODOT_CLEAR_COLOR
+            g.fillRect(0, 0, width, height)
+        }
+
         override fun addNotify() {
             super.addNotify()
             SwingUtilities.invokeLater { attach() }
         }
 
+        // Only reached when the Canvas could not step out first, e.g. when the editor closes.
         override fun removeNotify() {
             if (host.hwnd != 0L)
                 embedding.park(host.hwnd)
@@ -100,30 +104,33 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         }
     }
 
-    /** Keeps the Canvas over the placeholder's visible area; hiding it is immediate and keeps its HWND alive. */
-    private fun updateOverlay() {
-        val root = if (placeholder.isShowing) SwingUtilities.getRootPane(placeholder) else null
-        // Only a different window moves the Canvas; a hidden tab keeps it, hidden, in the current one.
-        if (root != null && root !== overlayRoot) {
-            overlayRoot?.layeredPane?.remove(canvas)
-            overlayRoot = root
-            root.layeredPane.add(canvas, OVERLAY_LAYER)
-        }
+    private val collapsed: Boolean
+        get() = !placeholder.isShowing || placeholder.width == 0 || placeholder.height == 0
 
-        val area = root?.let { SwingUtilities.convertRectangle(placeholder, placeholder.visibleRect, it.layeredPane) }
-        if (area == null || area.isEmpty) {
-            if (canvas.isVisible)
-                canvas.isVisible = false
-            return
+    private fun update() {
+        val inTab = canvas.parent === placeholder
+        if (collapsed) {
+            if (inTab)
+                stepOut()
+        } else if (!inTab) {
+            stepIn()
         }
-        if (canvas.bounds != area) {
-            canvas.bounds = area
-            canvas.validate()
-        }
-        if (!canvas.isVisible)
-            canvas.isVisible = true
         if (host.hwnd != 0L && canvas.isDisplayable)
             embedding.sync(host.hwnd, canvas)
+    }
+
+    private fun stepOut() {
+        val layeredPane = SwingUtilities.getRootPane(placeholder)?.layeredPane ?: return
+        canvas.isVisible = false
+        layeredPane.setComponentZOrder(canvas, 0)
+    }
+
+    private fun stepIn() {
+        placeholder.setComponentZOrder(canvas, 0)
+        placeholder.validate()
+        if (host.hwnd != 0L && canvas.isDisplayable)
+            embedding.resizeBeforeShow(host.hwnd, canvas, RESIZE_BEFORE_SHOW_TIMEOUT_MS)
+        canvas.isVisible = true
     }
 
     private fun attach() {
@@ -147,7 +154,7 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
 
     private fun embedHost() {
         embedding.embed(host.hwnd, canvas)
-        updateOverlay()
+        update()
     }
 
     private fun onReply(reply: String) {
@@ -191,16 +198,16 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
 
     override fun dispose() {
         syncTimer.stop()
-        overlayRoot?.layeredPane?.remove(canvas)
-        overlayRoot = null
+        canvas.parent?.remove(canvas)
         ApplicationManager.getApplication().executeOnPooledThread { host.stop() }
     }
 
     private companion object {
         const val RELOAD_DEBOUNCE_MS = 120
         const val SPLITTER_GRAB_MARGIN = 4
+        const val RESIZE_BEFORE_SHOW_TIMEOUT_MS = 50L
 
-        // Above the content pane, below IntelliJ's palette and popup layers, so those cut out of the Canvas.
-        val OVERLAY_LAYER: Int = JLayeredPane.DEFAULT_LAYER
+        // Godot's default clear colour (0.3, 0.3, 0.3); later the host should report the project's own.
+        val GODOT_CLEAR_COLOR = Color(0x4D, 0x4D, 0x4D)
     }
 }

@@ -5,13 +5,16 @@ import com.sun.jna.Native
 import com.sun.jna.Pointer
 import java.awt.Component
 import java.awt.Rectangle
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import javax.swing.JWindow
 
 /**
  * Hosts a foreign process's top-level window as a `WS_CHILD` of an AWT heavyweight component (Windows only).
- * A child window dies with its parent HWND, and AWT recreates peers whenever a component leaves and re-enters a
- * displayable hierarchy (tab switches, moving editors between windows), so callers must [park] before
- * `removeNotify` and [embed] again after `addNotify`.
+ * A child window dies with its parent HWND, and AWT recreates peers whenever a component is removed from a
+ * displayable hierarchy rather than moved with `setComponentZOrder`, so callers must [park] before `removeNotify`
+ * and [embed] again after `addNotify`.
  */
 class ChildWindowEmbedding(private val detachInput: Boolean) {
     private var lastSize: Rectangle? = null
@@ -59,6 +62,25 @@ class ChildWindowEmbedding(private val detachInput: Boolean) {
         } else if (!visible && shown) {
             user32.ShowWindowAsync(child, SW_HIDE)
             shown = false
+        }
+    }
+
+    /**
+     * Resizes the child to the parent's client area before the parent is shown, so no stale strip is exposed.
+     * Waits at most [timeoutMs] for the host to apply it; a host stuck on a breakpoint must not freeze the IDE.
+     */
+    fun resizeBeforeShow(child: Long, parent: Component, timeoutMs: Long) {
+        val rect = clientRect(Native.getComponentID(parent))
+        if (rect.isEmpty)
+            return
+        val resize = CompletableFuture.runAsync {
+            user32.SetWindowPos(child, 0, 0, 0, rect.width, rect.height, SWP_NOZORDER or SWP_NOACTIVATE)
+        }
+        try {
+            resize.get(timeoutMs, TimeUnit.MILLISECONDS)
+            lastSize = rect
+        } catch (_: TimeoutException) {
+            lastSize = null
         }
     }
 
