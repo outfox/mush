@@ -14,3 +14,8 @@ build/
 .intellijPlatform/
 .idea/
 out/
+
+# Plugin build
+output/
+.tmp/
+.kotlin/

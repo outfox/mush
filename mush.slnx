@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/backend/">
+    <Project Path="src/dotnet/ReSharperPlugin.Mush/ReSharperPlugin.Mush.Rider.csproj" />
+  </Folder>
+</Solution>

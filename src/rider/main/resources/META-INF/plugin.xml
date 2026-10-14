@@ -1,0 +1,19 @@
+<idea-plugin require-restart="true">
+  <id>dev.twodog.mush</id>
+  <name>mush</name>
+  <version>_PLACEHOLDER_</version>
+  <vendor url="https://github.com/outfox/mush">outfox</vendor>
+  <idea-version since-build="_PLACEHOLDER_" until-build="_PLACEHOLDER_" />
+  <depends>com.intellij.modules.rider</depends>
+
+  <description>
+<![CDATA[
+<p>Godot scene editing and C# debugging in Rider, backed by 2dog.</p>
+<p>Opens <code>.tscn</code> files in a split editor: Rider's own text editor next to a live Godot viewport.</p>
+]]>
+  </description>
+
+  <extensions defaultExtensionNs="com.intellij">
+    <fileEditorProvider implementation="dev.twodog.mush.scene.SceneEditorProvider"/>
+  </extensions>
+</idea-plugin>

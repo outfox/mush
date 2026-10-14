@@ -46,6 +46,12 @@ Rider frontend (Kotlin, JBR)          ReSharper backend (.NET)              mush
 
 ### Text pane (decided: `.tscn` only, no other format)
 - The left pane is the `.tscn` file itself in Rider's text editor, so undo/redo, VCS and local history work as is.
+  - The scene editor is a `TextEditorWithPreview`, the same split editor Markdown uses. Its text side is a real
+    `TextEditor` from `TextEditorProvider`, so line numbers, git blame/annotate, VCS gutter, find, folding and any
+    `.tscn` language support (highlighting, later completion) come from the platform and other plugins.
+  - The viewport is the preview side. The editor-only / split / preview-only toggle comes with it.
+  - `FileEditorPolicy.HIDE_DEFAULT_EDITOR` replaces the plain text tab, but only for files inside a Godot project
+    (an ancestor directory has `project.godot`).
 - The host reloads the scene from the unsaved document text on a debounce. Fine-grained property ops come later.
 - **Loading unsaved text.** Godot has no bound load-from-string (`resource_format_text.cpp:1440` always opens a
   file). Two routes:
