@@ -12,6 +12,12 @@
              from the Godot editor) -->
         <DefaultItemExcludes>$(DefaultItemExcludes);MushSample.2dog/**</DefaultItemExcludes>
     </PropertyGroup>
+    <!-- Godot.NET.Sdk disables default None items; list Godot's text resources so IDE solution views show them.
+         Dot folders (.godot/) and host folders stay excluded through the default excludes. -->
+    <ItemGroup>
+        <None Include="project.godot;**/*.tscn;**/*.tres;**/*.gdshader;**/*.gdshaderinc;**/*.gd"
+              Exclude="$(DefaultItemExcludes);$(DefaultExcludesInProjectFolder)" />
+    </ItemGroup>
     <ItemGroup>
         <PackageReference Include="2dog.godotsharp" Version="$(TwoDogVersion)" />
         <PackageReference Include="2dog.godotsharp.editor" Version="$(TwoDogVersion)"
