@@ -23,7 +23,7 @@ import java.awt.event.ComponentEvent
 import java.beans.PropertyChangeListener
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.Base64
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.SwingUtilities
@@ -36,7 +36,6 @@ import javax.swing.Timer
 class SceneViewportEditor(private val file: VirtualFile, private val document: Document) : UserDataHolderBase(), FileEditor {
     private val resPath = GodotProject.resPath(file)!!
     private val embedding = ChildWindowEmbedding(detachInput = System.getenv("MUSH_DETACH") == "1")
-    private val pendingTexts = ConcurrentLinkedQueue<Path>()
     private val host = SpikeHost(::onReply)
     private val reloadAlarm = Alarm(Alarm.ThreadToUse.POOLED_THREAD, this)
     private val canvas = HostCanvas()
@@ -116,7 +115,6 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
                 pushText()
             }
             reply.startsWith("loaded") || reply.startsWith("error") -> {
-                pendingTexts.poll()?.let { Files.deleteIfExists(it) }
                 SwingUtilities.invokeLater { status.text = reply }
             }
         }
@@ -126,10 +124,8 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         if (!host.isStarted)
             return
         val text = runReadActionBlocking { document.text }
-        val temp = Files.createTempFile("mush-scene", ".tscn")
-        Files.writeString(temp, text)
-        pendingTexts.add(temp)
-        host.send("text $resPath $temp")
+        // In-band, so no temp file can race the host or the editor.
+        host.send("text $resPath ${Base64.getEncoder().encodeToString(text.toByteArray(Charsets.UTF_8))}")
     }
 
     private fun sync() {
@@ -159,10 +155,7 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         syncTimer.stop()
         if (host.hwnd != 0L)
             embedding.park(host.hwnd)
-        ApplicationManager.getApplication().executeOnPooledThread {
-            host.stop()
-            generateSequence { pendingTexts.poll() }.forEach { Files.deleteIfExists(it) }
-        }
+        ApplicationManager.getApplication().executeOnPooledThread { host.stop() }
     }
 
     private companion object {

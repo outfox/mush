@@ -17,7 +17,8 @@ internal sealed class SceneLoader(SceneTree tree)
     public Timing Load(string resPath, string? text)
     {
         var watch = Stopwatch.StartNew();
-        var scene = text is null ? LoadFile(resPath) : LoadText(resPath, text);
+        // Disposing the wrapper drops its reference now instead of at finalization, which can be after shutdown.
+        using var scene = text is null ? LoadFile(resPath) : LoadText(resPath, text);
         var parseMs = watch.Elapsed.TotalMilliseconds;
 
         watch.Restart();

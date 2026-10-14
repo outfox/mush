@@ -39,7 +39,12 @@ class SpikeHost(private val onReply: (String) -> Unit) {
                 val reply = line.removePrefix("mush:")
                 if (reply.startsWith("hwnd "))
                     hwnd = reply.removePrefix("hwnd ").trim().toLong()
-                onReply(reply)
+                // The reader must outlive any failure in a reply handler, or the host goes silent.
+                try {
+                    onReply(reply)
+                } catch (e: Exception) {
+                    LOG.error("reply handler failed for '$reply'", e)
+                }
             }
         }
     }

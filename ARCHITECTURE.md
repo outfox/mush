@@ -66,6 +66,16 @@ Rider frontend (Kotlin, JBR)          ReSharper backend (.NET)              mush
     `FileAccessMemory`, with the real path as `local_path`. It fixes the remaining gaps: relative ext paths (rare)
     and sub-resource paths of the form `tmp::id`.
   - Keep the previous instance alive until the new one is loaded, because the resource cache is weak.
+  - Dispose the managed `PackedScene` wrapper right after `Instantiate()`. Otherwise its reference lives until
+    finalization, which can come after engine shutdown.
+  - Unsaved text crosses the host boundary in-band, base64 in the spike. A temp file per reload raced the editor
+    and the host: a delete failed with "used by another process" and killed the plugin's reader thread.
+  - **Godot bug, fork fix wanted.** When a node's parent path is missing, `SceneState::instantiate` warns
+    ("Parent path … has vanished", `packed_scene.cpp:213`) but never frees the node it created. The node and its
+    theme resources leak.
+    - Invalid intermediate text is the normal case while typing, so a long-lived host leaks on every such
+      keystroke.
+    - Found while bisecting exit leaks (2026-10-14): `Node.PrintOrphanNodes()` showed the stray `Label`.
   - Gap: inherited scenes take their parent from the cache, so unsaved edits in the parent's open tab don't show.
 - Viewport edits (later: gizmos, camera bookmarks) are written back as text edits to that document, never saved
   behind the editor's back.

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 using Godot;
 using Engine = twodog.Engine;
 
@@ -70,8 +71,9 @@ internal static class Program
                 case "load" when parts.Length == 2:
                     Report(loader.Load(parts[1], text: null), loader, camera);
                     break;
+                // Unsaved document text travels in-band as base64, so no temp file can race the editor.
                 case "text" when parts.Length == 3:
-                    Report(loader.Load(parts[1], File.ReadAllText(parts[2])), loader, camera);
+                    Report(loader.Load(parts[1], Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]))), loader, camera);
                     break;
                 // Blocks the engine thread like a debugger breakpoint would.
                 case "stall" when parts.Length == 2:
@@ -80,6 +82,10 @@ internal static class Program
                     break;
                 case "count":
                     Emit("count", CountNodes(loader.Current).ToString());
+                    break;
+                case "orphans":
+                    Node.PrintOrphanNodes();
+                    Emit("orphans", "printed");
                     break;
                 default:
                     Emit("error", $"unknown command: {line}");

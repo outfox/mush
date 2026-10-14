@@ -240,10 +240,8 @@ public final class Harness {
 
     private void sendText() {
         try {
-            var temp = Files.createTempFile("mush-harness", ".tscn");
-            Files.writeString(temp, text.getText());
-            host.send("text " + options.scene + " " + temp);
-        } catch (IOException e) {
+            host.send("text " + options.scene + " " + base64(text.getText()));
+        } catch (UncheckedIOException e) {
             log("text failed: " + e.getMessage());
         }
     }
@@ -315,10 +313,8 @@ public final class Harness {
         var latencies = new ArrayList<Double>();
         for (var i = 1; i <= 10; i++) {
             var edited = original.replace("text = \"mush sample 2D\"", "text = \"edit " + i + "\"");
-            var temp = Files.createTempFile("mush-harness", ".tscn");
-            Files.writeString(temp, edited);
             var start = System.nanoTime();
-            host.send("text " + options.scene + " " + temp);
+            host.send("text " + options.scene + " " + base64(edited));
             host.await("loaded", 10_000);
             latencies.add((System.nanoTime() - start) / 1e6);
             Thread.sleep(100);
@@ -377,6 +373,10 @@ public final class Harness {
             System.out.println("RESULT " + tag + " " + entry.getKey() + " = " + entry.getValue());
         // Close the way a user does, so shutdown ordering is exercised too.
         SwingUtilities.invokeLater(() -> frame.dispatchEvent(new WindowEvent(frame, WindowEvent.WINDOW_CLOSING)));
+    }
+
+    private static String base64(String text) {
+        return Base64.getEncoder().encodeToString(text.getBytes(StandardCharsets.UTF_8));
     }
 
     private static String summarize(List<Double> values) {
