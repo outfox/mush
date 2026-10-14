@@ -78,7 +78,7 @@ Rider frontend (Kotlin, JBR)          ReSharper backend (.NET)              mush
   forwarded and no texture is shared.
 - 2dog's Avalonia path is less "zero-copy" than this: it does one GPU copy plus a CPU stall per frame. It is not worth
   porting into JBR, which has no D3D or Vulkan texture import.
-### Windows embedding: two candidates, the spike decides
+### Windows embedding (decided: B, a true child window)
 **A. Godot's own way: an owned popup.**
 - The host runs Godot with `--wid <JBR frame HWND>` (main.cpp:2305). Godot then creates a borderless `WS_POPUP` owned
   by the frame:
@@ -126,14 +126,21 @@ Rider frontend (Kotlin, JBR)          ReSharper backend (.NET)              mush
 - First load is 38-56 ms parse plus 15-22 ms instantiate. Warm text reloads are about 1 ms parse plus 0.5 ms
   instantiate. The rest of the round trip is waiting for the host's next frame.
 - Resizes use `SWP_ASYNCWINDOWPOS` in both modes. `--sync` exists to measure B without it.
-- Leaning B: JBR composites lightweight Swing content above the child's Vulkan swapchain, which removes A's main
-  drawback.
+- **Decision: B.** JBR composites lightweight Swing content above the child's Vulkan swapchain, which removes A's
+  main drawback. Hands-on, A felt like the overlay trick it is, and B "just worked" (user, 2026-10-14).
+- **Lifecycle rules for B**, found through a `VK_ERROR_SURFACE_LOST_KHR` at shutdown: a `WS_CHILD` dies with its
+  parent HWND.
+  - AWT destroys and recreates the Canvas HWND whenever the component leaves and re-enters a displayable hierarchy:
+    tab moved to another window, re-docking, closing.
+  - So in `removeNotify`, park the Godot window first: hide it, switch it to `WS_POPUP` and `SetParent(hwnd, 0)`.
+    Re-embed it in `addNotify`.
+  - On close, park, then stop the host, then dispose.
+  - The harness's "Re-home" step checks this. Rendering resumes, with 0 host errors across re-home and close.
+- Input-queue detaching is still open. Plain B worked manually and so did detached B. Decide after a real debugger
+  breakpoint in Rider, because a breakpoint suspends more than the stall command does.
 - Still manual (`spike/harness/run.ps1`):
-  - clicking and typing in both processes during a stall; the input-queue hang is the classic B failure
-  - camera input in the child
-  - focus round trips, minimize/restore and Alt-Tab
-  - mixed DPI
-  - then the same in a Rider FileEditor with Rider's debugger on the host
+  - done by the user: camera input in the child, live text edits, stalls with interaction. B worked; A rejected.
+  - open: mixed DPI, then the same in a Rider FileEditor with Rider's debugger on the host
 
 ### Camera and selection
 - **v1, pure C#.** The host pushes its own current `Camera2D`/`Camera3D` and restores the scene's camera

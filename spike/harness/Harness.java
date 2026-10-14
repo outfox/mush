@@ -28,7 +28,21 @@ public final class Harness {
     private final Options options;
     private final JFrame frame = new JFrame();
     private final JTextArea text = new JTextArea();
-    private final Canvas canvas = new Canvas();
+    // AWT destroys and recreates the Canvas HWND whenever the component leaves and re-enters a displayable
+    // hierarchy. A WS_CHILD dies with its parent, so the Godot window moves out first and back in afterwards.
+    private final Canvas canvas = new Canvas() {
+        @Override public void removeNotify() {
+            park();
+            super.removeNotify();
+        }
+
+        @Override public void addNotify() {
+            super.addNotify();
+            if (host.hwnd != 0)
+                SwingUtilities.invokeLater(() -> embed(host.hwnd));
+        }
+    };
+    private final JPanel viewport = new JPanel(new BorderLayout());
     private final JLabel status = new JLabel(" ");
     private final Host host = new Host();
     private final AtomicLong maxEdtGapNanos = new AtomicLong();
@@ -53,9 +67,16 @@ public final class Harness {
 
     private void buildUi() {
         frame.setTitle("mush harness - mode " + options.mode + (options.detach ? " detach" : "") + (options.sync ? " sync" : ""));
-        frame.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
+        frame.setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
         frame.addWindowListener(new WindowAdapter() {
-            @Override public void windowClosed(WindowEvent e) { host.stop(); System.exit(0); }
+            // The host must release its window before the Canvas HWND that parents it is destroyed.
+            @Override public void windowClosing(WindowEvent e) {
+                park();
+                host.stop();
+                frame.dispose();
+                System.out.println("RESULT host_errors = " + host.errors.get());
+                System.exit(0);
+            }
         });
 
         text.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
@@ -70,7 +91,6 @@ public final class Harness {
 
         canvas.setBackground(Color.DARK_GRAY);
         canvas.setIgnoreRepaint(true);
-        var viewport = new JPanel(new BorderLayout());
         viewport.add(canvas, BorderLayout.CENTER);
 
         var split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, new JScrollPane(text), viewport);
@@ -83,6 +103,7 @@ public final class Harness {
         toolbar.add(button("Popup", this::showPopup));
         toolbar.add(button("Dialog", this::showDialog));
         toolbar.add(button("Stall 3s", () -> { maxEdtGapNanos.set(0); host.send("stall 3000"); }));
+        toolbar.add(button("Re-home", this::rehome));
 
         frame.add(toolbar, BorderLayout.NORTH);
         frame.add(split, BorderLayout.CENTER);
@@ -151,6 +172,28 @@ public final class Harness {
                     log(reply);
             };
         host.start(command);
+    }
+
+    private void park() {
+        var hwnd = host.hwnd;
+        if (hwnd == 0)
+            return;
+        Win32.showWindow(hwnd, Win32.SW_HIDE);
+        hostShown = false;
+        lastRect = null;
+        if (options.mode == 'b') {
+            var style = Win32.getWindowLongPtr(hwnd, Win32.GWL_STYLE);
+            Win32.setWindowLongPtr(hwnd, Win32.GWL_STYLE, (style & ~Win32.WS_CHILD) | Win32.WS_POPUP);
+            Win32.setParent(hwnd, 0);
+        }
+    }
+
+    // Simulates an editor tab moving to another window: the Canvas peer is destroyed and recreated.
+    private void rehome() {
+        viewport.remove(canvas);
+        viewport.revalidate();
+        viewport.add(canvas, BorderLayout.CENTER);
+        viewport.revalidate();
     }
 
     private void embed(long hwnd) {
@@ -325,10 +368,15 @@ public final class Harness {
         Thread.sleep(1500);
         capture(out, tag + "-7-3d");
 
+        SwingUtilities.invokeAndWait(this::rehome);
+        Thread.sleep(1500);
+        capture(out, tag + "-8-rehomed");
+        results.put("host_errors_before_close", host.errors.get());
+
         for (var entry : results.entrySet())
             System.out.println("RESULT " + tag + " " + entry.getKey() + " = " + entry.getValue());
-        host.stop();
-        System.exit(0);
+        // Close the way a user does, so shutdown ordering is exercised too.
+        SwingUtilities.invokeLater(() -> frame.dispatchEvent(new WindowEvent(frame, WindowEvent.WINDOW_CLOSING)));
     }
 
     private static String summarize(List<Double> values) {
@@ -348,9 +396,11 @@ public final class Harness {
 
     private static final class Host {
         private Process process;
+        private Thread reader;
         private BufferedWriter input;
         private final BlockingQueue<String> replies = new LinkedBlockingQueue<>();
         volatile long hwnd;
+        final java.util.concurrent.atomic.AtomicInteger errors = new java.util.concurrent.atomic.AtomicInteger();
         java.util.function.LongConsumer onHwnd = h -> { };
         java.util.function.Consumer<String> onReply = r -> { };
 
@@ -359,11 +409,13 @@ public final class Harness {
             process = new ProcessBuilder(command).redirectErrorStream(true).start();
             input = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
             Runtime.getRuntime().addShutdownHook(new Thread(process::destroy));
-            var reader = new Thread(() -> {
+            reader = new Thread(() -> {
                 try (var lines = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = lines.readLine()) != null) {
                         if (!line.startsWith("mush:")) {
+                            if (line.contains("ERROR"))
+                                errors.incrementAndGet();
                             if (line.contains("ERROR") || line.contains("WARNING"))
                                 System.out.println("[host] " + line);
                             continue;
@@ -418,6 +470,8 @@ public final class Harness {
                 send("quit");
                 if (!process.waitFor(5, TimeUnit.SECONDS))
                     process.destroy();
+                // Drain the host's last lines before the JVM exits.
+                reader.join(2000);
             } catch (Exception e) {
                 process.destroy();
             }
