@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <!-- Spike host shaped like the planned hidden host: it lives outside the Godot project tree and references
+         the game project and 2dog.engine explicitly, inheriting nothing from the game folder. -->
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <OutputType>Exe</OutputType>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <IsPackable>false</IsPackable>
+        <ApplicationManifest>app.manifest</ApplicationManifest>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <MushGameDir>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '../../samples/MushSample'))</MushGameDir>
+        <TwoDogVersion>4.7.2.119</TwoDogVersion>
+        <GodotProjectDir>$(MushGameDir)</GodotProjectDir>
+        <TwoDogVariant>editor</TwoDogVariant>
+        <TwoDogRemoveDuplicateGodotAnalyzers>true</TwoDogRemoveDuplicateGodotAnalyzers>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="2dog.engine" Version="$(TwoDogVersion)"/>
+        <ProjectReference Include="$(MushGameDir)MushSample.csproj"/>
+    </ItemGroup>
+</Project>
