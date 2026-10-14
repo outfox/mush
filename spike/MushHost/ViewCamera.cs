@@ -5,6 +5,7 @@ namespace Mush.Spike;
 /// <summary>
 /// Editor camera that overrides the scene's own: middle-drag pans (2D) or orbits (3D, Shift pans), wheel zooms.
 /// Input arrives natively in the Godot window; the root's WindowInput signal sees it before the scene does.
+/// The cameras live under the root, outside the scene, so the view carries over when edits reload the scene.
 /// </summary>
 internal sealed class ViewCamera
 {
@@ -14,6 +15,7 @@ internal sealed class ViewCamera
     private Camera2D? _camera2D;
     private Camera3D? _camera3D;
     private bool _dragging;
+    private string? _scenePath;
 
     private Vector3 _target;
     private float _distance = 10f;
@@ -26,15 +28,33 @@ internal sealed class ViewCamera
         _root.WindowInput += OnInput;
     }
 
-    public void Attach(Node scene)
+    public void Attach(Node scene, string resPath)
     {
+        var is3D = scene is Node3D;
+        var sameView = resPath == _scenePath && (is3D ? _camera3D != null : _camera2D != null);
+        _scenePath = resPath;
+
+        // Cameras in the freshly loaded scene may have made themselves current; take the view back.
+        if (sameView)
+        {
+            if (is3D)
+                _camera3D!.MakeCurrent();
+            else
+                _camera2D!.MakeCurrent();
+            return;
+        }
+
         _camera2D?.Free();
         _camera3D?.Free();
         _camera2D = null;
         _camera3D = null;
 
-        if (scene is Node3D)
+        if (is3D)
         {
+            _target = Vector3.Zero;
+            _distance = 10f;
+            _yaw = 0f;
+            _pitch = 0.4f;
             if (_root.GetCamera3D() is { } sceneCamera)
                 OrbitFrom(sceneCamera.GlobalPosition);
             _camera3D = new Camera3D { Name = "MushCamera3D" };
