@@ -43,6 +43,10 @@ public final class Harness {
         }
     };
     private final JPanel viewport = new JPanel(new BorderLayout());
+    // Stands in for JBTabsImpl: children are positioned by hand, like its layout passes.
+    private final JPanel tabs = new JPanel(null);
+    private JComponent editor;
+    private JComponent selected;
     private final JLabel status = new JLabel(" ");
     private final Host host = new Host();
     private final AtomicLong maxEdtGapNanos = new AtomicLong();
@@ -106,7 +110,16 @@ public final class Harness {
         toolbar.add(button("Re-home", this::rehome));
 
         frame.add(toolbar, BorderLayout.NORTH);
-        frame.add(split, BorderLayout.CENTER);
+        editor = split;
+        selected = editor;
+        tabs.add(editor);
+        tabs.addComponentListener(new ComponentAdapter() {
+            @Override public void componentResized(ComponentEvent e) {
+                selected.setBounds(0, 0, tabs.getWidth(), tabs.getHeight());
+                tabs.validate();
+            }
+        });
+        frame.add(tabs, BorderLayout.CENTER);
         frame.add(status, BorderLayout.SOUTH);
         frame.setSize(1400, 820);
         frame.setLocationByPlatform(true);
@@ -174,17 +187,24 @@ public final class Harness {
         host.start(command);
     }
 
+    // Mode b parks under a never-shown window, as the plugin does, so the child is never top-level.
+    private JWindow parking;
+
     private void park() {
         var hwnd = host.hwnd;
         if (hwnd == 0)
             return;
-        Win32.showWindow(hwnd, Win32.SW_HIDE);
         hostShown = false;
         lastRect = null;
         if (options.mode == 'b') {
-            var style = Win32.getWindowLongPtr(hwnd, Win32.GWL_STYLE);
-            Win32.setWindowLongPtr(hwnd, Win32.GWL_STYLE, (style & ~Win32.WS_CHILD) | Win32.WS_POPUP);
-            Win32.setParent(hwnd, 0);
+            if (parking == null) {
+                parking = new JWindow();
+                parking.addNotify();
+            }
+            Win32.setParent(hwnd, Win32.hwnd(parking));
+            Win32.showWindowAsync(hwnd, Win32.SW_HIDE);
+        } else {
+            Win32.showWindow(hwnd, Win32.SW_HIDE);
         }
     }
 
@@ -200,10 +220,12 @@ public final class Harness {
         Win32.allowSetForegroundWindow(host.pid());
         if (options.mode == 'b') {
             var style = Win32.getWindowLongPtr(hwnd, Win32.GWL_STYLE);
-            style &= ~(Win32.WS_POPUP | Win32.WS_CAPTION | Win32.WS_THICKFRAME | Win32.WS_SYSMENU
-                | Win32.WS_MINIMIZEBOX | Win32.WS_MAXIMIZEBOX);
-            style |= Win32.WS_CHILD | Win32.WS_CLIPSIBLINGS | Win32.WS_CLIPCHILDREN;
-            Win32.setWindowLongPtr(hwnd, Win32.GWL_STYLE, style);
+            if ((style & Win32.WS_CHILD) == 0) {
+                style &= ~(Win32.WS_POPUP | Win32.WS_CAPTION | Win32.WS_THICKFRAME | Win32.WS_SYSMENU
+                    | Win32.WS_MINIMIZEBOX | Win32.WS_MAXIMIZEBOX);
+                style |= Win32.WS_CHILD | Win32.WS_CLIPSIBLINGS | Win32.WS_CLIPCHILDREN;
+                Win32.setWindowLongPtr(hwnd, Win32.GWL_STYLE, style);
+            }
             Win32.setParent(hwnd, Win32.hwnd(canvas));
             if (options.detach) {
                 var hostThread = Win32.windowThread(hwnd);
@@ -225,10 +247,23 @@ public final class Harness {
         var rect = options.mode == 'a' ? Win32.windowRect(Win32.hwnd(canvas)) : Win32.clientRect(Win32.hwnd(canvas));
         visible &= rect.width > 100 && rect.height > 100;
 
+        if (options.mode == 'b') {
+            // Size and visibility in one async call, so the child never shows at a stale size.
+            if (visible && (!hostShown || !rect.equals(lastRect))) {
+                var flags = Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE | (options.sync ? 0 : Win32.SWP_ASYNCWINDOWPOS);
+                if (!hostShown)
+                    flags |= Win32.SWP_SHOWWINDOW | Win32.SWP_FRAMECHANGED;
+                Win32.setWindowPos(hwnd, 0, 0, 0, rect.width, rect.height, flags);
+                lastRect = rect;
+                hostShown = true;
+            } else if (!visible && hostShown) {
+                Win32.showWindowAsync(hwnd, Win32.SW_HIDE);
+                hostShown = false;
+            }
+            return;
+        }
         if (visible && !rect.equals(lastRect)) {
             var flags = Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE | (options.sync ? 0 : Win32.SWP_ASYNCWINDOWPOS);
-            if (options.mode == 'b')
-                flags |= Win32.SWP_FRAMECHANGED;
             Win32.setWindowPos(hwnd, 0, rect.x, rect.y, rect.width, rect.height, flags);
             lastRect = rect;
         }
@@ -364,7 +399,8 @@ public final class Harness {
         Thread.sleep(1500);
         capture(out, tag + "-7-3d");
 
-        SwingUtilities.invokeAndWait(this::rehome);
+        results.put("rehome_flash", detectFlash(out, tag));
+        results.put("tabswap_frames", captureTabSwap(out, tag));
         Thread.sleep(1500);
         capture(out, tag + "-8-rehomed");
         results.put("host_errors_before_close", host.errors.get());
@@ -373,6 +409,119 @@ public final class Harness {
             System.out.println("RESULT " + tag + " " + entry.getKey() + " = " + entry.getValue());
         // Close the way a user does, so shutdown ordering is exercised too.
         SwingUtilities.invokeLater(() -> frame.dispatchEvent(new WindowEvent(frame, WindowEvent.WINDOW_CLOSING)));
+    }
+
+    /**
+     * Emulates JBTabsImpl switching away from the editor tab and back: the incoming component is added, the
+     * outgoing one is laid out at (0, 0, 0, 0) and removed only after focus settles (deferred removal).
+     * Saves the frame in a burst; the incoming placeholder is light grey, so dark pixels in the tab area are the
+     * viewport showing where it should not.
+     */
+    private String captureTabSwap(Path dir, String tag) throws Exception {
+        var robot = new Robot();
+        var bounds = new Rectangle[1];
+        SwingUtilities.invokeAndWait(() -> bounds[0] = frame.getBounds());
+        var incoming = new JPanel();
+        incoming.setBackground(Color.LIGHT_GRAY);
+
+        var start = System.nanoTime();
+        SwingUtilities.invokeLater(() -> {
+            selected = incoming;
+            tabs.add(incoming);
+            incoming.setBounds(0, 0, tabs.getWidth(), tabs.getHeight());
+            editor.setBounds(0, 0, 0, 0);
+            editor.doLayout();
+            tabs.repaint();
+            var removeLater = new Timer(250, e -> {
+                tabs.remove(editor);
+                tabs.repaint();
+            });
+            removeLater.setRepeats(false);
+            removeLater.start();
+            var back = new Timer(700, e -> {
+                tabs.remove(incoming);
+                selected = editor;
+                tabs.add(editor);
+                editor.setBounds(0, 0, tabs.getWidth(), tabs.getHeight());
+                tabs.revalidate();
+                tabs.repaint();
+            });
+            back.setRepeats(false);
+            back.start();
+        });
+        var saved = new ArrayList<String>();
+        while (System.nanoTime() - start < 1_400_000_000L) {
+            var ms = (System.nanoTime() - start) / 1_000_000;
+            var image = robot.createScreenCapture(bounds[0]);
+            var name = String.format("%s-swap-%04d.png", tag, ms);
+            ImageIO.write(image, "png", dir.resolve(name).toFile());
+            saved.add(Long.toString(ms));
+        }
+        return saved.size() + " frames at ms " + String.join(",", saved);
+    }
+
+    /**
+     * Re-homes the Canvas while grabbing the screen in a burst, then reports changes against a baseline outside
+     * the Canvas, where Godot animates anyway: inside the frame, and in the top-left corner of the screen.
+     */
+    private String detectFlash(Path dir, String tag) throws Exception {
+        var robot = new Robot();
+        var screen = new Rectangle(Toolkit.getDefaultToolkit().getScreenSize());
+        var bounds = new Rectangle[2];
+        SwingUtilities.invokeAndWait(() -> {
+            bounds[0] = frame.getBounds();
+            bounds[1] = new Rectangle(canvas.getLocationOnScreen(), canvas.getSize());
+        });
+        var watch = new Rectangle(bounds[0]);
+        watch.add(new Rectangle(0, 0, 400, 300));
+        watch = watch.intersection(screen);
+        var baseline = robot.createScreenCapture(watch);
+
+        var frames = new ArrayList<BufferedImage>();
+        var stamps = new ArrayList<Long>();
+        var start = System.nanoTime();
+        SwingUtilities.invokeLater(this::rehome);
+        while (System.nanoTime() - start < 1_200_000_000L) {
+            frames.add(robot.createScreenCapture(watch));
+            stamps.add((System.nanoTime() - start) / 1_000_000);
+        }
+
+        var report = new ArrayList<String>();
+        var worst = -1;
+        var worstArea = 0L;
+        for (var i = 0; i < frames.size(); i++) {
+            var box = diffBox(baseline, frames.get(i), watch, bounds[1]);
+            if (box == null)
+                continue;
+            var area = (long) box.width * box.height;
+            report.add(stamps.get(i) + "ms:" + box.x + "," + box.y + " " + box.width + "x" + box.height);
+            if (area > worstArea) {
+                worstArea = area;
+                worst = i;
+            }
+        }
+        if (worst >= 0)
+            ImageIO.write(frames.get(worst), "png", dir.resolve(tag + "-9-flash.png").toFile());
+        return frames.size() + " frames, frame at " + bounds[0].x + "," + bounds[0].y + ", canvas at "
+            + bounds[1].x + "," + bounds[1].y + ", changed: " + (report.isEmpty() ? "none" : String.join(" | ", report));
+    }
+
+    // Screen-space bounding box of pixels that differ from the baseline, ignoring the Canvas area.
+    private static Rectangle diffBox(BufferedImage a, BufferedImage b, Rectangle origin, Rectangle ignore) {
+        Rectangle box = null;
+        for (var y = 0; y < a.getHeight(); y += 2) {
+            for (var x = 0; x < a.getWidth(); x += 2) {
+                var sx = origin.x + x;
+                var sy = origin.y + y;
+                if (ignore.contains(sx, sy) || a.getRGB(x, y) == b.getRGB(x, y))
+                    continue;
+                if (box == null)
+                    box = new Rectangle(sx, sy, 1, 1);
+                else
+                    box.add(sx, sy);
+            }
+        }
+        return box;
     }
 
     private static String base64(String text) {
@@ -487,7 +636,7 @@ public final class Harness {
         static final long WS_MINIMIZEBOX = 0x00020000L, WS_MAXIMIZEBOX = 0x00010000L;
         static final long WS_CLIPSIBLINGS = 0x04000000L, WS_CLIPCHILDREN = 0x02000000L;
         static final int SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_FRAMECHANGED = 0x20;
-        static final int SWP_ASYNCWINDOWPOS = 0x4000;
+        static final int SWP_SHOWWINDOW = 0x40, SWP_ASYNCWINDOWPOS = 0x4000;
         static final int SW_HIDE = 0, SW_SHOWNA = 8;
 
         private static final Linker LINKER = Linker.nativeLinker();
@@ -498,6 +647,7 @@ public final class Harness {
 
         private static final MethodHandle SET_WINDOW_POS = fn("SetWindowPos", FunctionDescriptor.of(I, P, P, I, I, I, I, I));
         private static final MethodHandle SHOW_WINDOW = fn("ShowWindow", FunctionDescriptor.of(I, P, I));
+        private static final MethodHandle SHOW_WINDOW_ASYNC = fn("ShowWindowAsync", FunctionDescriptor.of(I, P, I));
         private static final MethodHandle SET_PARENT = fn("SetParent", FunctionDescriptor.of(P, P, P));
         private static final MethodHandle GET_LONG = fn("GetWindowLongPtrW", FunctionDescriptor.of(P, P, I));
         private static final MethodHandle SET_LONG = fn("SetWindowLongPtrW", FunctionDescriptor.of(P, P, I, P));
@@ -531,6 +681,11 @@ public final class Harness {
 
         static void showWindow(long hwnd, int command) {
             try { var ignored = (int) SHOW_WINDOW.invokeExact(hwnd, command); }
+            catch (Throwable t) { throw new IllegalStateException(t); }
+        }
+
+        static void showWindowAsync(long hwnd, int command) {
+            try { var ignored = (int) SHOW_WINDOW_ASYNC.invokeExact(hwnd, command); }
             catch (Throwable t) { throw new IllegalStateException(t); }
         }
 

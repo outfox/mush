@@ -17,21 +17,28 @@ import dev.twodog.mush.host.SpikeHost
 import java.awt.BorderLayout
 import java.awt.Canvas
 import java.awt.Color
-import java.awt.Dimension
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
+import java.awt.event.HierarchyBoundsAdapter
+import java.awt.event.HierarchyEvent
 import java.beans.PropertyChangeListener
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Base64
 import javax.swing.JComponent
+import javax.swing.JLayeredPane
 import javax.swing.JPanel
+import javax.swing.JRootPane
 import javax.swing.SwingUtilities
 import javax.swing.Timer
 
 /**
  * The viewport half of the scene editor: a spike host's Godot window embedded as a child of a heavyweight Canvas.
  * Unsaved document text is pushed to the host on a short debounce.
+ *
+ * The Canvas does not live inside the editor tab. Editor tabs remove hidden tab components from the hierarchy, which
+ * would destroy the Canvas HWND on every tab switch. Instead the tab holds a lightweight placeholder, and the Canvas
+ * sits in the window's layered pane over the placeholder's visible area, hidden while the placeholder is not shown.
  */
 class SceneViewportEditor(private val file: VirtualFile, private val document: Document) : UserDataHolderBase(), FileEditor {
     private val resPath = GodotProject.resPath(file)!!
@@ -39,22 +46,32 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
     private val host = SpikeHost(::onReply)
     private val reloadAlarm = Alarm(Alarm.ThreadToUse.POOLED_THREAD, this)
     private val canvas = HostCanvas()
+    private val placeholder = JPanel()
     private val status = JBLabel(" ")
     private val panel = JPanel(BorderLayout())
-    private val syncTimer = Timer(100) { sync() }
+    private val syncTimer = Timer(100) { updateOverlay() }
+    private var overlayRoot: JRootPane? = null
 
     init {
         canvas.background = Color.DARK_GRAY
-        // A heavyweight's minimum size defaults to its current size, which pins the editor splitter.
-        canvas.minimumSize = Dimension(0, 0)
-        canvas.preferredSize = JBUI.size(320, 240)
         canvas.ignoreRepaint = true
-        canvas.addComponentListener(object : ComponentAdapter() {
-            override fun componentResized(e: ComponentEvent) = sync()
-            override fun componentShown(e: ComponentEvent) = sync()
-            override fun componentHidden(e: ComponentEvent) = sync()
+        canvas.isVisible = false
+
+        placeholder.background = Color.DARK_GRAY
+        placeholder.addHierarchyListener { e ->
+            if (e.changeFlags and (HierarchyEvent.SHOWING_CHANGED or HierarchyEvent.PARENT_CHANGED).toLong() != 0L)
+                updateOverlay()
+        }
+        placeholder.addHierarchyBoundsListener(object : HierarchyBoundsAdapter() {
+            override fun ancestorMoved(e: HierarchyEvent) = updateOverlay()
+            override fun ancestorResized(e: HierarchyEvent) = updateOverlay()
         })
-        panel.add(canvas, BorderLayout.CENTER)
+        placeholder.addComponentListener(object : ComponentAdapter() {
+            override fun componentResized(e: ComponentEvent) = updateOverlay()
+            override fun componentMoved(e: ComponentEvent) = updateOverlay()
+        })
+
+        panel.add(placeholder, BorderLayout.CENTER)
         // The splitter's grab zone extends over its neighbours through the glass pane, which never sees events over
         // the native child; a lightweight margin keeps that zone on the viewport side.
         panel.border = JBUI.Borders.emptyLeft(SPLITTER_GRAB_MARGIN)
@@ -69,7 +86,7 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         syncTimer.start()
     }
 
-    /** AWT recreates the Canvas HWND when the editor moves between windows; the Godot window must step out first. */
+    /** The Canvas HWND is recreated only when the editor moves to another IDE window; the Godot window steps out first. */
     private inner class HostCanvas : Canvas() {
         override fun addNotify() {
             super.addNotify()
@@ -81,6 +98,32 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
                 embedding.park(host.hwnd)
             super.removeNotify()
         }
+    }
+
+    /** Keeps the Canvas over the placeholder's visible area; hiding it is immediate and keeps its HWND alive. */
+    private fun updateOverlay() {
+        val root = if (placeholder.isShowing) SwingUtilities.getRootPane(placeholder) else null
+        // Only a different window moves the Canvas; a hidden tab keeps it, hidden, in the current one.
+        if (root != null && root !== overlayRoot) {
+            overlayRoot?.layeredPane?.remove(canvas)
+            overlayRoot = root
+            root.layeredPane.add(canvas, OVERLAY_LAYER)
+        }
+
+        val area = root?.let { SwingUtilities.convertRectangle(placeholder, placeholder.visibleRect, it.layeredPane) }
+        if (area == null || area.isEmpty) {
+            if (canvas.isVisible)
+                canvas.isVisible = false
+            return
+        }
+        if (canvas.bounds != area) {
+            canvas.bounds = area
+            canvas.validate()
+        }
+        if (!canvas.isVisible)
+            canvas.isVisible = true
+        if (host.hwnd != 0L && canvas.isDisplayable)
+            embedding.sync(host.hwnd, canvas)
     }
 
     private fun attach() {
@@ -104,7 +147,7 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
 
     private fun embedHost() {
         embedding.embed(host.hwnd, canvas)
-        sync()
+        updateOverlay()
     }
 
     private fun onReply(reply: String) {
@@ -128,11 +171,6 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         host.send("text $resPath ${Base64.getEncoder().encodeToString(text.toByteArray(Charsets.UTF_8))}")
     }
 
-    private fun sync() {
-        if (host.hwnd != 0L && canvas.isDisplayable)
-            embedding.sync(host.hwnd, canvas)
-    }
-
     override fun getComponent(): JComponent = panel
 
     override fun getPreferredFocusedComponent(): JComponent? = null
@@ -153,13 +191,16 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
 
     override fun dispose() {
         syncTimer.stop()
-        if (host.hwnd != 0L)
-            embedding.park(host.hwnd)
+        overlayRoot?.layeredPane?.remove(canvas)
+        overlayRoot = null
         ApplicationManager.getApplication().executeOnPooledThread { host.stop() }
     }
 
     private companion object {
         const val RELOAD_DEBOUNCE_MS = 120
         const val SPLITTER_GRAB_MARGIN = 4
+
+        // Above the content pane, below IntelliJ's palette and popup layers, so those cut out of the Canvas.
+        val OVERLAY_LAYER: Int = JLayeredPane.DEFAULT_LAYER
     }
 }
