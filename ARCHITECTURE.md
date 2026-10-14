@@ -112,6 +112,29 @@ Rider frontend (Kotlin, JBR)          ReSharper backend (.NET)              mush
 - mixed DPI: Godot calls `SetProcessDpiAwareness(SYSTEM_DPI_AWARE)` (`:7934`), but JBR is per-monitor. Try a
   PerMonitorV2 manifest on the host exe.
 
+**Spike results so far** (2026-10-14; `spike/harness`, JBR 25.0.4 from Rider 2026.2.3, Vulkan, 2dog 4.7.2.119):
+
+| | A owned popup | B `WS_CHILD` | B + detached input queues |
+|---|---|---|---|
+| renders in the Canvas, 2D and 3D | yes | yes (`--hidden-window`, shown after `SetParent`) | yes |
+| lightweight Swing overlay over the viewport | **hidden under Godot** | **drawn on top** | drawn on top |
+| lightweight `JPopupMenu` over the viewport | **hidden under Godot** | **drawn on top** | drawn on top |
+| owned dialog over the viewport | on top | on top | on top |
+| max EDT gap while the host is stalled 3 s and the frame is resized 16× | 18-24 ms | 19-35 ms | 21 ms |
+| unsaved-text reload, round trip incl. frame wait | median 7 ms | median 6-7 ms | median 7 ms |
+
+- First load is 38-56 ms parse plus 15-22 ms instantiate. Warm text reloads are about 1 ms parse plus 0.5 ms
+  instantiate. The rest of the round trip is waiting for the host's next frame.
+- Resizes use `SWP_ASYNCWINDOWPOS` in both modes. `--sync` exists to measure B without it.
+- Leaning B: JBR composites lightweight Swing content above the child's Vulkan swapchain, which removes A's main
+  drawback.
+- Still manual (`spike/harness/run.ps1`):
+  - clicking and typing in both processes during a stall; the input-queue hang is the classic B failure
+  - camera input in the child
+  - focus round trips, minimize/restore and Alt-Tab
+  - mixed DPI
+  - then the same in a Rider FileEditor with Rider's debugger on the host
+
 ### Camera and selection
 - **v1, pure C#.** The host pushes its own current `Camera2D`/`Camera3D` and restores the scene's camera
   afterwards. That is all Godot's `CameraOverride` does. Middle-drag pans and the wheel zooms, with input arriving
