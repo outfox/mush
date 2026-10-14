@@ -1,0 +1,16 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# Godot
+.godot/
+
+# Gradle / IntelliJ
+.gradle/
+build/
+.intellijPlatform/
+.idea/
+out/
