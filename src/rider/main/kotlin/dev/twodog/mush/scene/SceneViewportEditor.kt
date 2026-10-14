@@ -10,12 +10,14 @@ import com.intellij.openapi.fileEditor.FileEditorState
 import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.components.JBLabel
+import com.intellij.util.ui.JBUI
 import com.intellij.util.Alarm
 import dev.twodog.mush.embed.ChildWindowEmbedding
 import dev.twodog.mush.host.SpikeHost
 import java.awt.BorderLayout
 import java.awt.Canvas
 import java.awt.Color
+import java.awt.Dimension
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.beans.PropertyChangeListener
@@ -44,6 +46,9 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
 
     init {
         canvas.background = Color.DARK_GRAY
+        // A heavyweight's minimum size defaults to its current size, which pins the editor splitter.
+        canvas.minimumSize = Dimension(0, 0)
+        canvas.preferredSize = JBUI.size(320, 240)
         canvas.ignoreRepaint = true
         canvas.addComponentListener(object : ComponentAdapter() {
             override fun componentResized(e: ComponentEvent) = sync()
@@ -51,6 +56,9 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
             override fun componentHidden(e: ComponentEvent) = sync()
         })
         panel.add(canvas, BorderLayout.CENTER)
+        // The splitter's grab zone extends over its neighbours through the glass pane, which never sees events over
+        // the native child; a lightweight margin keeps that zone on the viewport side.
+        panel.border = JBUI.Borders.emptyLeft(SPLITTER_GRAB_MARGIN)
         panel.add(status, BorderLayout.SOUTH)
 
         document.addDocumentListener(object : DocumentListener {
@@ -159,5 +167,6 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
 
     private companion object {
         const val RELOAD_DEBOUNCE_MS = 120
+        const val SPLITTER_GRAB_MARGIN = 4
     }
 }
