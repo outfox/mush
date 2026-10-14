@@ -1,0 +1,33 @@
+# .NET build outputs
+bin/
+obj/
+AppBundle/
+*.dll
+*.exe
+*.pdb
+
+# User-specific files
+*.user
+*.suo
+*.userprefs
+.vs/
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+.idea/
+
+# Godot-specific ignores
+.godot/
+.import/
+# NOTE: export_presets.cfg is intentionally tracked - the web (browser-wasm)
+# publish exports the "Web" preset from it. Secrets never land there: Godot 4
+# keeps export credentials in .godot/export_credentials.cfg (ignored above).
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# NuGet packages
+*.nupkg
+packages/

@@ -1,0 +1,27 @@
+[gd_scene format=3]
+
+[ext_resource type="Texture2D" path="res://art/mush.svg" id="1_tex"]
+[ext_resource type="Script" path="res://scripts/Spinner.cs" id="2_spin"]
+[ext_resource type="Script" path="res://scripts/Ring.cs" id="3_ring"]
+
+[node name="Sample2D" type="Node2D"]
+
+[node name="Spinner" type="Node2D" parent="."]
+position = Vector2(640, 360)
+script = ExtResource("2_spin")
+
+[node name="Mush" type="Sprite2D" parent="Spinner"]
+texture = ExtResource("1_tex")
+
+[node name="Ring" type="Node2D" parent="."]
+position = Vector2(640, 360)
+script = ExtResource("3_ring")
+Texture = ExtResource("1_tex")
+
+[node name="Label" type="Label" parent="."]
+offset_left = 24.0
+offset_top = 16.0
+offset_right = 424.0
+offset_bottom = 56.0
+theme_override_font_sizes/font_size = 24
+text = "mush sample 2D"

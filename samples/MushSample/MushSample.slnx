@@ -1,0 +1,9 @@
+<Solution>
+  <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="Editor" />
+    <BuildType Name="Release" />
+  </Configurations>
+  <Project Path="MushSample.2dog/MushSample.2dog.csproj" />
+  <Project Path="MushSample.csproj" />
+</Solution>

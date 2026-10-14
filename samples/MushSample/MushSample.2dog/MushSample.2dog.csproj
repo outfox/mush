@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <!-- Release is windowed (no console window on Windows); Debug/Editor keep the console -->
+        <OutputType>Exe</OutputType>
+        <OutputType Condition="'$(Configuration)' == 'Release'">WinExe</OutputType>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <IsPackable>false</IsPackable>
+        <!-- The assembly keeps the folder name, but 'MushSample.2dog' is
+             not a valid C# namespace (digit-leading segment). -->
+        <RootNamespace>MushSample</RootNamespace>
+        <!-- comctl32 v6 + long paths for Godot's Windows display server -->
+        <ApplicationManifest>app.manifest</ApplicationManifest>
+        <!-- Publish bundles the .NET runtime so the output runs without a .NET install;
+             opt out with -p:PublishSelfContained=false -->
+        <PublishSelfContained>true</PublishSelfContained>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="2dog.engine" Version="$(TwoDogVersion)"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../MushSample.csproj"/>
+    </ItemGroup>
+
+    <!-- Godot project = the parent directory (solution root); nested hosts are hidden from the Godot editor by
+         their .gdignore -->
+    <PropertyGroup>
+        <GodotProjectDir>..</GodotProjectDir>
+        <TwoDogVariant Condition="'$(Configuration)' == 'Debug'">debug</TwoDogVariant>
+        <TwoDogVariant Condition="'$(Configuration)' == 'Editor'">editor</TwoDogVariant>
+        <TwoDogRemoveDuplicateGodotAnalyzers>true</TwoDogRemoveDuplicateGodotAnalyzers>
+    </PropertyGroup>
+</Project>

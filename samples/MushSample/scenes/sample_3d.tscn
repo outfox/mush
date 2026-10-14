@@ -1,0 +1,31 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/Spinner3D.cs" id="1_spin"]
+[ext_resource type="Script" path="res://scripts/Pillars.cs" id="2_pillars"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_core"]
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_floor"]
+size = Vector2(12, 12)
+
+[node name="Sample3D" type="Node3D"]
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 0, 6, 0)
+shadow_enabled = true
+
+[node name="Camera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.894, 0.447, 0, -0.447, 0.894, 0, 4, 9)
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+mesh = SubResource("PlaneMesh_floor")
+
+[node name="Core" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+script = ExtResource("1_spin")
+
+[node name="Box" type="MeshInstance3D" parent="Core"]
+mesh = SubResource("BoxMesh_core")
+
+[node name="Pillars" type="Node3D" parent="."]
+script = ExtResource("2_pillars")
