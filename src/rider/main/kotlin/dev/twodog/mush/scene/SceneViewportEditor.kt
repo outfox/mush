@@ -57,7 +57,15 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
     private val syncTimer = Timer(100) { update(); pollStats() }
     private var ticks = 0
     private var lastLoad = " "
-    private var lastRemix = 0L
+    private var remixFailedAt = 0L
+    // The region empties when the outgoing tab leaves, shortly after a step in; watch it every frame until then.
+    private var watchUntil = 0L
+    private val watchTimer = Timer(16) {
+        if (System.nanoTime() > watchUntil)
+            (it.source as Timer).stop()
+        else if (canvas.parent === placeholder)
+            remixIfCutAway()
+    }
 
     init {
         LOG.info("$resPath: editor created")
@@ -145,6 +153,9 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         if (host.hwnd != 0L && canvas.isDisplayable)
             embedding.resizeBeforeShow(host.hwnd, canvas, RESIZE_BEFORE_SHOW_TIMEOUT_MS)
         canvas.isVisible = true
+        remixFailedAt = 0L
+        watchUntil = System.nanoTime() + WATCH_AFTER_STEP_IN_NS
+        watchTimer.restart()
     }
 
     /**
@@ -155,14 +166,14 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
     private fun remixIfCutAway() {
         if (!canvas.isShowing || !embedding.isCutAway(canvas))
             return
-        val now = System.nanoTime()
-        if (now - lastRemix < REMIX_INTERVAL_NS)
+        // A lightweight covering the whole viewport empties the region legitimately; back off when a remix didn't help.
+        if (System.nanoTime() - remixFailedAt < REMIX_BACKOFF_NS)
             return
-        lastRemix = now
         LOG.info("$resPath: canvas region was empty, remixing")
         canvas.isVisible = false
         placeholder.validate()
         canvas.isVisible = true
+        remixFailedAt = if (embedding.isCutAway(canvas)) System.nanoTime() else 0L
     }
 
     // Diagnostics for the viewport that stays grey after tab switches.
@@ -244,6 +255,7 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
     override fun dispose() {
         LOG.info("$resPath: editor disposed")
         syncTimer.stop()
+        watchTimer.stop()
         canvas.parent?.remove(canvas)
         ApplicationManager.getApplication().executeOnPooledThread { host.stop() }
     }
@@ -253,8 +265,8 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         const val SPLITTER_GRAB_MARGIN = 4
         const val RESIZE_BEFORE_SHOW_TIMEOUT_MS = 50L
         const val STATS_TICKS = 10
-        // A lightweight covering the whole viewport legitimately empties the region; don't toggle it every tick.
-        const val REMIX_INTERVAL_NS = 1_000_000_000L
+        const val REMIX_BACKOFF_NS = 1_000_000_000L
+        const val WATCH_AFTER_STEP_IN_NS = 600_000_000L
         val LOG = logger<SceneViewportEditor>()
 
         // Godot's default clear colour (0.3, 0.3, 0.3); later the host should report the project's own.
