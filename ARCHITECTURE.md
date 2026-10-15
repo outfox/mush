@@ -2,22 +2,103 @@
 
 mush is a Rider plugin for Godot scene editing and C# script debugging, backed by 2dog (libgodot hosted by .NET).
 This draft is based on research into 2dog at `b03e7d12` (2026-10-14), the ReSharper/Rider SDK and Godot's
-game-in-editor embedding. Open decisions are marked **[decide]**.
+game-in-editor embedding. The ownership and execution contract below records the decisions agreed on 2026-10-15.
+It defines the implementation target; the current spike still starts an engine per editor and runs scene scripts.
+Open decisions elsewhere are marked **[decide]**.
+
+## Ownership and execution contract
+
+**Decided, 2026-10-15.** One persistent edit host serves each Godot project. Each editing scratch has its own
+viewport and worlds inside that engine. Frozen is the default: scene time stands still and user scripts do not run.
+
+### Ownership
+
+| Scope | Owns | Lifetime |
+|---|---|---|
+| Godot project | edit host process, one engine, engine owner thread, scratch registry and shared resource cache | first scratch until the Godot project closes |
+| Scratch session | scene instance, viewport, fresh `World2D` and `World3D`, editor camera, selection, execution policy and temporary-load namespace | explicit scratch creation until close |
+| Editor view | attachment of a scratch's viewport to an IDE surface | tab/split/tool-window presentation |
+| Document | canonical `.tscn` text, modification version and Rider undo history | Rider document lifetime |
+
+- Project identity follows the resolved Godot project root within a Rider project session. Two Godot projects
+  never share an edit engine. Sharing hosts between separate Rider instances is outside the initial scope.
+- Every scratch has an opaque ID independent of its scene path. Every host start has a new generation. Commands
+  and replies carry these identities; document updates also carry a version.
+- Two editor splits showing the same document have independent scratches, worlds and cameras. A document edit
+  updates both scratches; panning or resetting one does not change the other.
+- A scratch is attached to one presentation surface at a time. Moving it between an editor and a future tool
+  window preserves its identity. Simultaneous independent views use separate scratches.
+- Godot access and scratch lifecycle operations execute on the engine owner thread. Transport threads submit
+  work without calling Godot themselves.
+
+### Scratch lifetime
+
+- Opening another scratch creates a viewport/world pair without booting another engine. A native Godot `Window`
+  per scratch is the Windows embedding candidate; milestone 4 must prove multiple windows in one engine.
+- Hiding, collapsing, moving or re-docking a view preserves its scratch and camera. Hidden scratches suspend
+  rendering and preview updates; the host continues pumping its engine and native messages.
+- Closing a scratch releases its scene, viewport, worlds, callbacks and temporary files. It leaves sibling
+  scratches and the shared engine running. Removing a presentation component during a move is not a close.
+- With no scratches, the host remains warm until the project closes. Idle eviction and warm standby hosts are
+  later optimizations, outside the initial contract.
+- Host exit invalidates every scratch's native handles and pending work. Recovery uses a new host generation
+  and restores current documents, cameras and policies. Scratch IDs cannot make replies from an old generation valid.
+- Play/debug runs in a separate host. Import work also remains separate from the edit engine.
+
+### Frozen behavior
+
+| Concern | Default frozen scratch |
+|---|---|
+| User scripts | no script instance constructors or field initializers, property accessors, lifecycle, process, physics, input or signal callbacks |
+| Exported values | preserve serialized values and use metadata/defaults that can be obtained without executing project code; unresolved values are reported |
+| Physics and navigation | no simulation advancement in the scratch's worlds |
+| Built-in motion | particles, animations, timers, audio/video and other time-driven visuals remain still; no autoplay |
+| Rendering | redraws after document, camera, size or selection changes remain available |
+| Input | editor camera and editor controls receive input; scene nodes do not receive interaction |
+| Preview | motion or editor-script execution requires an explicit action for that scratch |
+
+- Frozen must be established before scene/resource script instantiation, including later script attachment and
+  nested loads. Setting `ProcessMode.Disabled` after loading does not satisfy the contract.
+- The edit host does not automatically run the game's main scene or autoload scripts. Any future project-level
+  services need an explicit execution policy.
+- `[Tool]` does not bypass Frozen. The proposed `twodog.editor.EditorUpdate` opt-in belongs to explicit editor
+  preview; it does not enable ordinary game lifecycle callbacks. Its API and activation lifecycle are deferred.
+- Entering Frozen after a preview rebuilds the scratch from the current document with fresh worlds. Merely
+  pausing existing script instances cannot undo constructors or revoke asynchronous work they already started.
+- Assembly/module initialization, exported-default discovery, custom resources and time-driven rendering must
+  be audited before claiming this behavior. Unsupported paths must fail closed or expose unresolved data.
+- Fork execution hooks belong only to `.editor` builds. Debug/release runtime behavior stays unchanged. The
+  availability of an opt-in C# contract in non-editor game builds must be resolved before that API is introduced.
+
+### Isolation and responsiveness
+
+Worlds isolate their scene rendering and physics spaces. The engine thread, `SceneTree`, resource cache,
+project settings, managed statics and any explicitly enabled project services remain shared. A scratch is not
+an arbitrary-code isolation boundary. Mutable shared resources need explicit copying or coordinated project
+updates; resetting one scratch must not reset process-wide time, audio, RNG or sibling state.
+Host generation/build/start and explicit editor preview respect Rider's project trust; Frozen does not replace it.
+
+A blocked or debugger-suspended host must not block Rider. UI submissions never wait for host I/O or engine
+progress. Pending document/resize updates are bounded and replace obsolete values per scratch; lifecycle
+operations retain ordering. Shutdown has a deadline independent of the transport writer. A shared-host failure
+may stop all its scratches, while Rider retains usable documents and recovery controls.
+
+Milestone 1 fixes these behavioral boundaries. It does not establish a complete fork API, move process ownership
+into the backend, replace the spike transport, or implement a Game View tool window.
 
 ## Processes
 
 ```
-Rider frontend (Kotlin, JBR)          ReSharper backend (.NET)              mush host (.NET 10 + 2dog, editor variant)
-  .tscn FileEditor                      solution / csproj / script model      owns libgodot on its main thread
-   ├─ .tscn text pane ◄── rd ──►        document → scene sync    ◄── pipe ──► scene load / reload / property ops
-   └─ viewport pane (Canvas HWND)       host lifecycle                        editor camera (pan/zoom)
-         ▲                                                                    reports its native window handle
-         └──── host window tracked over the Canvas rect (owned popup or WS_CHILD) — DWM composites, 0 copies ────┘
+Rider frontend (Kotlin, JBR)      ReSharper backend (planned)       Edit host (.NET + 2dog, editor variant)
+  .tscn text documents             project / script model           one engine and owner thread per project
+  scratch sessions  <--- rd --->   shared host supervision <----->  scratch registry / document reloads
+  viewport A (Canvas HWND) <------- native child embedding -------- Window A + worlds A + camera A
+  viewport B (Canvas HWND) <------- native child embedding -------- Window B + worlds B + camera B
 ```
 
-- **Host out of process.** 2dog allows one engine per process. It needs an owner thread, and a crash must not kill
-  ReSharper. The host is also a plain `dotnet` executable, so Rider's own .NET debugger can launch or attach to it
-  without the hostfxr tricks stock Godot needs. This is the biggest structural advantage of building on 2dog.
+- **Host out of process.** mush uses one engine per edit host, shared by the project's scratches. It needs an
+  owner thread, and a crash must not kill ReSharper. The host is also a plain `dotnet` executable, so Rider's own
+  .NET debugger can launch or attach to it without the hostfxr tricks stock Godot needs. This is the biggest structural advantage of building on 2dog.
 - **Host ships in the plugin (decided).** The plugin bundles the host code as a package in a local feed. For each
   Godot project it generates a hidden host project under `%LOCALAPPDATA%/mush/hosts/<project-hash>/` and builds it
   with `dotnet build -c Editor`. Nothing is added to the user's project.
@@ -35,9 +116,10 @@ Rider frontend (Kotlin, JBR)          ReSharper backend (.NET)              mush
     the `2dog.import` helper are all runtime-overridable. It would mean rebuilding version resolution (godotsharp →
     engine nuspec → `NativesVersion`, `.double`), loading `twodog.dll` into a private ALC, because its assembly
     version changes every release, and losing the build-time hash checks. Keep it as a later fast path at most.
-- **Host protocol.** Reuse twodog.repl's transport: a current-user named pipe carrying UTF-8 JSON lines, a
-  first-line mode header (`\u001e2dog.mush/1`) and discovery files in `%LOCALAPPDATA%/2dog/...`. Embedding
-  2dog.repl's exec mode as well gives Rider a live C# console into the host almost for free.
+- **Host protocol (later transport target).** Reuse twodog.repl's transport: a current-user named pipe carrying
+  UTF-8 JSON lines, a first-line mode header (`\u001e2dog.mush/1`) and discovery files in `%LOCALAPPDATA%/2dog/...`. Embedding
+  2dog.repl's exec mode as well gives Rider a live C# console into the host. P1 hardening and scratch identity
+  are implemented against the existing process transport first; pipe/RD migration is a separate change.
 - **Shared contracts.** One C# contracts library is used by the backend, the host and the import worker. It targets
   `net8.0`: Rider 2026.2.3 (build 262) runs its backend on .NET 8, set to roll forward to the newest major, on
   Windows too (`lib/ReSharperHost/Rider.Backend.*.runtimeconfig.json`).
@@ -55,7 +137,8 @@ Rider frontend (Kotlin, JBR)          ReSharper backend (.NET)              mush
 - The host reloads the scene from the unsaved document text on a debounce. Fine-grained property ops come later.
 - **Loading unsaved text.** Godot has no bound load-from-string (`resource_format_text.cpp:1440` always opens a
   file). Two routes:
-  - **v1, no fork.** Write the buffer to `res://.godot/mush/<hash>.tscn` and load it with `CACHE_MODE_IGNORE`: a
+  - **v1, no parser fork.** Write the buffer to
+    `res://.godot/mush/<host-generation>/<scratch-id>/<hash>.tscn` and load it with `CACHE_MODE_IGNORE`: a
     fresh scene and sub-resources, while textures and meshes still come from the cache. Then call
     `set_path_cache(real_path)` on the `PackedScene` and its `SceneState` before `Instantiate()`, so that
     `scene_file_path` and inherited-state lookups point at the real file.
@@ -148,9 +231,10 @@ Rider frontend (Kotlin, JBR)          ReSharper backend (.NET)              mush
   parent HWND.
   - AWT destroys and recreates the Canvas HWND whenever the component leaves and re-enters a displayable hierarchy:
     tab moved to another window, re-docking, closing.
-  - So in `removeNotify`, park the Godot window first: hide it, switch it to `WS_POPUP` and `SetParent(hwnd, 0)`.
-    Re-embed it in `addNotify`.
-  - On close, park, then stop the host, then dispose.
+  - Before a Canvas peer is removed, park the Godot window under a never-shown AWT parking window, keeping
+    `WS_CHILD`; making it a top-level popup can flash. Re-embed after the Canvas has a valid peer.
+  - On scratch close, park before removing the Canvas, then release the scratch viewport asynchronously. Closing
+    one view must not stop the shared host or wait for its message pump. Project close stops the host.
   - The harness's "Re-home" step checks this. Rendering resumes, with 0 host errors across re-home and close.
 - Input-queue detaching is still open. Plain B worked manually and so did detached B. Decide after a real debugger
   breakpoint in Rider, because a breakpoint suspends more than the stall command does.
@@ -159,8 +243,8 @@ Rider frontend (Kotlin, JBR)          ReSharper backend (.NET)              mush
   - open: mixed DPI, then the same in a Rider FileEditor with Rider's debugger on the host
 
 ### Camera and selection
-- **v1, pure C#.** The host pushes its own current `Camera2D`/`Camera3D` and restores the scene's camera
-  afterwards. That is all Godot's `CameraOverride` does. Middle-drag pans and the wheel zooms, with input arriving
+- **v1, pure C#.** Each scratch has its own current editor `Camera2D`/`Camera3D`, outside its replaceable scene
+  subtree. That is all Godot's `CameraOverride` does. Middle-drag pans and the wheel zooms, with input arriving
   natively in the Godot window.
 - **Later: Godot's built-in runtime select.** It offers 2D pan/zoom, 3D freelook and click/box select with outline
   drawing (`runtime_node_select.cpp`).
@@ -189,59 +273,50 @@ Rider frontend (Kotlin, JBR)          ReSharper backend (.NET)              mush
   reach `placeholder_script_instance_create`, `placeholder_script_instance_update` and
   `object_set_script_instance` through the GDExtension interface.
 
-**Alternative.** Make the policy a view mode, not a script attribute.
-- The host never saves. The `.tscn` text is canonical, so whatever scripts do at runtime cannot leak into the file.
-  This makes running real code in the edit view safe, and the choice can be a toggle on the viewport instead of
-  `[Tool]` in source. `[Tool]` is ignored.
+**Decided policy.** Frozen has the strict meaning in the ownership and execution contract: no user-script
+execution and no scene-time advancement. The previous draft's Frozen mode ran constructors, `_EnterTree` and
+`_Ready`; that definition is superseded. Built-in visual motion also requires explicit preview.
 
-| Mode | Script instances | Ticks | Purpose |
+The document remains canonical and the host never saves it automatically. Scripts that are explicitly allowed
+later can still write files or change shared state, so editor preview requires project trust and is not a sandbox.
+
+| Execution | Script policy | Scene time | Scope |
 |---|---|---|---|
-| Inert | placeholders for all scripts | built-ins only, autoplay gated | pure data view |
-| Frozen | real; ctor/`_EnterTree`/`_Ready` run | no process/physics/input in the scene; audio muted | procedural content, as frame 0 |
-| Live | real | everything | play-in-view; still discarded on reload |
+| Frozen (default) | placeholders/data only; no project-code evaluation for defaults | stopped | one scratch |
+| Explicit motion preview (later) | ordinary scripts remain disabled | selected built-ins may advance | one scratch |
+| Explicit editor preview (later) | only explicitly enabled opt-in editor callbacks | defined by that preview's policy | one scratch |
+| Play/debug | ordinary game semantics | running | separate host |
 
-- Switching modes reloads the scene from the document with a different policy.
-- Fork seam: a per-object policy hook at the `object.cpp:984` branch, `(Object*, Ref<Script>) → real | placeholder`,
-  exposed to the host. It covers scene loading, `set_script` and reloads in one place, and it is independent of the
-  editor hint. That independence matters because many node classes key side effects off the editor hint, and C#
-  caches it at static init (`ReflectionUtils.cs:32`).
-- Frozen and Live are possible without fork changes: `PROCESS_MODE_DISABLED` on the scene root, physics off, audio
-  bus muted.
-- Fallback if the alternative fails: bind `set_scripting_enabled` and `set_editor_hint` and behave exactly like
-  Godot.
+The default is decided; exact preview controls and the `EditorUpdate` API remain later design work.
 
-### Lifecycle gates (proposal)
-Modes are presets over independent gates: `Construct`, `EnterTree`, `Ready`, `Process`, `Physics`, `Input`.
-Inert = none, Frozen = Construct + EnterTree + Ready, Live = all.
+### Execution policy mechanisms to investigate
 
-| Gate | Seam | Toggle in place? |
+- Establish a scratch's policy during scene/resource construction, before nodes are attached to a viewport.
+  Nested loads and later `set_script` calls must retain the correct scratch context.
+- Investigate the per-object real/placeholder branch in `Object::set_script` and C# export/default discovery.
+  The historical editor-hint and scripting-enabled globals cannot independently control multiple scratches.
+- Freezing time includes physics spaces, internal node processing and time-driven rendering. A global physics,
+  render-loop, audio or time-scale switch would also change other scratches and does not satisfy the contract.
+- C# notification gating alone misses constructors, property access, delegate signals and asynchronous
+  continuations. Switching back to Frozen rebuilds scene/world state; a host restart is needed when process-level
+  work cannot be stopped cooperatively.
+- Keep execution hooks in `.editor` natives/bindings. Use the stock Godot implementation as research, without
+  making the scratch contract depend on starting `EditorNode` or running the host with `--editor`.
+- The initial implementation needs Frozen and isolated scratch state. Arbitrary independent lifecycle toggles,
+  placeholder upgrades in place and replaying skipped callbacks are deferred.
+
+### Reset and recovery scopes
+
+The document is canonical. Scratch resets rebuild from its current text and preserve editor view state.
+
+| Scope | Action | Preserves |
 |---|---|---|
-| Construct | per-object policy hook at `object.cpp:984` (fork, native) | off→on: upgrade placeholders, like `reload_assemblies` does; on→off: reload |
-| EnterTree / Ready | managed: `CSharpInstanceBridge.Call` (`CSharpInstanceBridge.cs:10`), the single native→C# entry for `_EnterTree`, `_Ready` and `_Notification`. GodotSharp fork only, no native rebuild. C# only for now (decided); a native `GDVIRTUAL_CALL` gate would cover GDScript | off→on: catch up with `RequestReady()` on the subtree, then remove/re-add the root (`ready_first`, `node.cpp:3559`) |
-| Process / Physics / Input | scene root `ProcessMode = Disabled`, physics server inactive, input not routed to the scene | yes, instant |
+| Scratch | replace its scene and fresh `World2D`/`World3D` under the existing viewport, applying Frozen before loading | engine, sibling scratches, own editor camera/selection/policy |
+| Project resources | explicitly refresh shared cached dependencies and rebuild affected scratches as needed | host generation and unaffected document/view state |
+| Host restart | stop the shared edit host, boot a new generation and recreate its scratches | latest documents and restorable camera/selection/policy state |
 
-- Caveats:
-  - Gating at the bridge does not stop C# delegate-based signal connections (DelegateUtils) or `Task.Delay`
-    continuations.
-  - `_Ready` gating happens after `READY` already enabled processing by `has_method` (`node.cpp:268-279`), so the
-    Process gate must be independent.
-- **Callers:** viewport toolbar, Rider actions, protocol commands (`setGates`, `rollback`), and so the REPL, tests and
-  agents.
-
-### Rollback tiers (proposal)
-The document is canonical, so rollback always rebuilds from it. Each tier is a superset of the one before.
-
-| Tier | Action | Cost | Resets |
-|---|---|---|---|
-| 0 Pause | flip Process/Physics/Input gates | instant | nothing, just stops time |
-| 1 Rollback | free the scene subtree, re-instantiate the cached `PackedScene`, fresh `World2D/3D` (cf. `ReplWorld`), free nodes scripts added outside the subtree, reset `TimeScale`/mouse mode/audio, fixed RNG seed | ms | scene state, physics, worlds |
-| 2 Reload | re-parse document text (temp `.tscn` under `.godot/mush/`, no load-from-string API) with `CACHE_MODE_REPLACE_DEEP` | ms-100s ms | + sub/ext resources changed on disk |
-| 3 Restart | swap to a warm standby host process (pre-booted, already embedded hidden); boot a new standby | ~instant if warm | + C# statics, autoloads, native state, new game assembly |
-
-- View state lives outside the scene: the editor camera, the gates and selection. Tier 3 restores it over the
-  protocol.
-- Tier 3 is also what a game-assembly rebuild needs when hot reload can't apply the edit.
-- Changed source assets: see Asset import.
+A scratch reset cannot undo managed statics, process-level tasks or project services. Recovery from those effects,
+a host crash or an incompatible assembly rebuild affects the whole edit host. Warm standby hosts are deferred.
 
 ### Asset import (proposal)
 Importers and `EditorFileSystem` exist only when Godot runs with `--editor` (`editor_node.cpp:8515`). The scene host
@@ -266,12 +341,12 @@ process.
 
 | Change | Worker | Scene host |
 |---|---|---|
-| importable source (png, glb, wav, ttf …) or its `.import` | `reimport_files` | `ReloadFromFile()` on cached resources, like `EditorNode::_resources_reimported` (`editor_node.cpp:1461`). Imported scenes → Tier 1 |
-| new / moved / deleted file | `update_file` | Tier 2 if referenced |
-| `.tres`, other `.tscn`, `.gdshader` | none | `ReloadFromFile()`, or `CACHE_MODE_REPLACE`, which `copy_from`s into the cached instance (`resource_loader.cpp:560-590`), so references stay valid |
+| importable source (png, glb, wav, ttf …) or its `.import` | `reimport_files` | coordinate shared resource refresh; rebuild affected imported-scene scratches |
+| new / moved / deleted file | `update_file` | refresh dependencies and rebuild affected scratches if referenced |
+| `.tres`, other `.tscn`, `.gdshader` | none | coordinate project-wide refresh of shared cached resources; preserve references where appropriate |
 | edited `.tscn` | none | document path, not the watcher |
-| `.cs` | none | build → hot reload or Tier 3 |
-| `project.godot` | `scan_changes` | Tier 3 |
+| `.cs` | none | build → hot reload or shared-host restart |
+| `project.godot` | `scan_changes` | shared-host restart |
 
 - Ignore `.godot/`, trees containing `.gdignore`, `bin/`, `obj/`, and `*.uid` files written by the worker itself.
 ### Locks and the stock Godot editor (decided: no new locks)
@@ -303,7 +378,8 @@ process.
 - **Play.** The run configuration launches the generated host in play mode under Rider's .NET debugger. Breakpoints,
   stepping and watches work because it is an ordinary .NET process. Its window can embed into the same viewport pane
   or float.
-- **Edit host.** Attach the debugger on demand to debug scripts running in Frozen/Live view modes.
+- **Edit host.** Attach the debugger on demand to debug explicitly enabled editor-preview callbacks. Suspending
+  the shared host pauses all its scratches; Rider must remain responsive.
 - **Verify:** Rider debugging and hot reload of an executable from a project outside the solution, i.e. the hidden
   host. If hot reload needs the project in the solution, add the generated project as a solution folder item.
 - **Hot reload.**
@@ -312,44 +388,46 @@ process.
     game via `LoadFromStream`.
   - New methods and `[Export]` members need the pending 2dog fix: non-readonly generated `StringName` fields, a
     native per-script class-info/export refresh and a `[MetadataUpdateHandler]`.
-  - Rude edits and rebuilds: restart the edit host (~340 ms headless boot) and restore scene and camera state. This
-    is simpler than collectible-ALC reload, which 2dog compiles only into editor builds and has never exercised.
+  - Rude edits and rebuilds: restart the shared edit host (~340 ms headless boot in the earlier measurement) and
+    restore all scratch documents and camera state. Collectible-ALC reload remains a later investigation.
 
 ## Coexistence
 JetBrains' open-source Godot Support plugin already registers `.tscn` (tree-only preview), run configs and debugging.
 mush should add its editor as an extra tab and not replace theirs; an optional dependency can come later.
 
-## Host topology and lifecycle (proposal)
-- **One build, three roles.** The hidden host project produces one exe, and `--mush-role edit|play|import` selects
-  the role. All roles need the same editor-variant natives and the game assembly; C# import plugins need the game
-  assembly too.
-- **Edit hosts: one per visible scene editor.**
-  - `--wid` embeds only Godot's main window, and a separate process per tab gives isolation.
-  - A tab that is hidden keeps its host but hides the window and stops rendering
-    (`RenderingServer.RenderLoopEnabled = false`). The host keeps pumping messages so Windows doesn't flag it as
-    hung.
-  - Hosts beyond a small limit are evicted, least recently used first.
-- **Optional warm spare** per project for Tier 3 rollback.
-- **Import worker:** one per project, exits when idle.
-- **Play host:** launched by a Rider run configuration under the .NET debugger. Its window embeds into a "Game" tab
-  or floats.
-- **Owner.** The backend builds, launches and supervises the hosts: `Process.Start`, a Windows Job Object so they
-  die with Rider, the pipe and restarts. The frontend only receives the host HWND and status over rd, and positions
-  the window itself, because tracking it is latency-critical.
-- **Triggers.**
-  - The host is built when the first scene editor opens, with progress shown as a background task.
-  - A game build attempts hot reload; if that fails, Tier 3.
+## Host topology and lifecycle
+
+- **Edit host (decided):** one persistent process and engine per Godot project, with a registry of independent
+  scratch viewports/worlds. The first scratch starts it; later scratches reuse it; project close stops it.
+- **Window embedding:** prove a native Godot `Window` per scratch in milestone 4. The existing `ReplWorld` is a
+  precedent for separate worlds in one engine, not evidence that every Rider embedding/debugger case already works.
+- **Visibility:** suspend only the hidden scratch's rendering/preview work. Continue pumping the host. Do not use
+  `RenderingServer.RenderLoopEnabled = false` to hide one scratch while another remains visible.
+- **Play host:** a separate process launched by a Rider run configuration under the .NET debugger. It can embed
+  into a future Game tool window or float. Ordinary play semantics do not change the edit host's execution policy.
+- **Import worker (later):** one per project, separate from editing, with idle shutdown.
+- **Build roles (proposal):** the hidden host project may produce one executable with edit/play/import roles.
+  Packaging must preserve ordinary play semantics and `.editor`-only execution hooks; exact variant selection is
+  later work.
+- **Supervision:** a project-level owner starts/stops the host and handles exit/recovery independently of editor
+  components. The backend is the eventual owner of generation/build and supervision; the frontend owns native
+  positioning. The P1 fix stays in the existing launcher before any backend/RD migration.
+- **Recovery:** a new process gets a new host generation. All scratches reconnect from current document and view
+  state. A failed scratch close cannot require successful communication with a stopped engine to release Rider UI.
 
 ## Protocols (sketch)
-**Host pipe.** JSON lines after the mode header. Requests carry `id`, responses carry `id` + `ok`/`error`, and events
-have no `id`.
+**Host messages.** The later pipe carries JSON lines after the mode header. Requests carry `id`, responses carry
+`id` + `ok`/`error`, and events have no request ID. Scratch messages carry `hostGeneration` and `scratchId`;
+document loads also carry `version`. Acknowledgement of a write is distinct from successful scene application.
 
 | Message | Direction | Payload |
 |---|---|---|
-| `hello` | → host | → `{pid, role, godot, twodog, renderer, hwnd}` |
-| `scene.load` | → host | `{path, text?, version}` → `{version, ms, errors[]}` |
-| `gates.set` / `mode.set` | → host | gate bits / preset |
-| `rollback` | → host | `{tier}` |
+| `hello` | → host | → `{pid, hostGeneration, role, godot, twodog, renderer}` |
+| `scratch.open` / `scratch.close` | → host | scratch identity and scene path → per-scratch HWND/state or close acknowledgement |
+| `scene.load` | → host | `{path, text?, version}` → `{version, ms, errors[]}` within the identified scratch |
+| `preview.set` (later) | → host | explicit per-scratch preview policy |
+| `scratch.reset` | → host | rebuild the identified scratch from the current document |
+| `host.restart` | → supervisor | recreate the project edit host and all its scratches |
 | `camera.get` / `camera.set` / `camera.frame` | → host | 2D offset+zoom, 3D transform+fov / node path |
 | `resources.reload` | → host | `{paths[]}`, routed from the import worker |
 | `log`, `script.exception`, `scene.state`, `exit` | host → | events |
@@ -358,14 +436,14 @@ have no `id`.
 
 - A REPL console is a second connection to the same pipe using 2dog.repl's exec header.
 
-**rd model** (frontend ↔ backend), one `SceneSession` per scene editor:
-- `scenePath`
-- `text`, versioned and debounced on the frontend
-- `status`: building, starting, running or error, plus a message
-- `hostHwnd`
-- `mode` and gates
-- calls: `rollback(tier)`, `frameNode(path)`
-- `log` as a signal
+**rd model (later frontend ↔ backend target).** A project host owns multiple scratch sessions. Editors attach
+views to sessions rather than owning processes.
+
+- Project host: generation, build/process state, failure and restart notification.
+- Scratch: ID, scene path, document version/text, status, its HWND and editor view state.
+- Frozen is the initial policy; explicit preview controls are added later.
+- Calls: create/close/reset scratch, frame node, restart host.
+- Logs/events identify their project generation and scratch when applicable.
 
 ## Repo layout (proposal)
 ```
@@ -387,7 +465,7 @@ mush/
 
 ## Testing (proposal)
 - **Host and worker:** integration tests spawn the real exe against a temp copy of `samples/MushSample` and check:
-  - scene load from text, gates, rollback tiers
+  - versioned scene loads from text, independent scratch worlds, Frozen behavior and reset/recovery scopes
   - import routing, Godot-editor detection
 - **CI:** Windows runner, headless. 2dog notes that lavapipe present fails on Windows CI, so rendering and embedding
   are tested locally through `harness/` and the Rider sandbox (`gradlew :runIde`).
@@ -395,22 +473,31 @@ mush/
   an interface so the harness and Rider share it.
 
 ## Milestones
-1. **Spike (Windows first, decided).**
-   1. `samples/MushSample` via `dnx 2dog new`.
-   2. Minimal host exe from the 2dog template: `--wid`, scene from the CLI, prints its HWND, reloads the scene from a
-      temp file on stdin command. No protocol yet.
-   3. `harness/`: a JBR Swing app (JFrame, text pane and Canvas) that launches the host and implements embedding A
-      and B behind a switch.
-   4. Run the decisive tests in the harness, then repeat the Rider-specific ones in a template plugin FileEditor:
-      tool windows, completion, and a breakpoint in the host with Rider's debugger attached.
-   5. Exit: A or B chosen, workarounds listed, text-to-pixels reload latency measured on the sample scenes.
-2. **Host.** Plugin-bundled host package, hidden host project generation, pipe protocol: open/reload scene from
-   document text, resize, editor camera, report window handle. View modes: Frozen/Live first (no fork change), then
-   the fork's script-instance policy hook for Inert.
-3. **Plugin.** `dotnet new resharper-rider-plugin` scaffold, rd model, split FileEditor and debounced live reload on
-   document change. Fine-grained property ops come later.
-4. **Import worker.** Headless `--editor` worker in a 2dog host driving `EditorFileSystem`, watcher and routing,
-   Godot-editor detection, fork patch to skip `.recovery_mode_lock` for hosted headless editor boots.
-5. **Debug.** Generated run configuration for the play host, attach to the edit host, hot reload verification and
-   the 2dog metadata-update fix.
-6. **Later.** macOS CALayerHost, X11, shared-memory fallback, selection and gizmos, overlay UI.
+
+The Windows spike established the initial child-window approach. The following sequence implements the shared
+host and strict Frozen contract; each step has a separate validation gate.
+
+1. **Ownership and execution contract (decided, 2026-10-15).** One edit engine per project; independent scratches
+   and worlds; shared documents across splits; Frozen means no scripts and no motion by default. Complete when
+   superseded topology/execution assumptions are removed from this draft.
+2. **P1 responsiveness.** Harden the existing launcher with a dedicated writer, bounded/coalesced pending state,
+   process exit handling and shutdown independent of pipe progress. Gate: a non-reading child, stalled engine,
+   killed host, startup/close races and real debugger suspension cannot block Rider or grow pending work indefinitely.
+3. **Scratch sessions.** Separate session ownership from editor presentation; add generation/scratch/request IDs
+   and document versions while keeping the existing process transport. Gate: stale replies, close/reopen races,
+   superseded updates and paths containing spaces behave correctly.
+4. **Shared-engine experiment.** Script-free scenes in two native viewports with separate worlds/cameras; share
+   embedding code between the harness and plugin. Gate: one engine startup/PID, distinct worlds/handles, independent
+   state, and safe hide/resize/re-home/close. Measure cold-engine and additional-scratch startup separately.
+5. **Editor-only Frozen policy.** Investigate construction/resource/default and time-control seams; implement the
+   smallest `.editor`-only hooks satisfying Frozen. Gate: no forbidden script callbacks or time advancement, policy
+   independent across scratches, and unchanged debug/release behavior.
+6. **Rider shared-host integration.** A project owner serves multiple editor scratches, each with its own load
+   namespace; recover current documents/cameras after host exit. Gate: editor splits and moves reuse one engine,
+   closing one scratch leaves siblings alive, and crash recovery respects host generations.
+7. **Explicit editor-script opt-in.** Define `EditorUpdate`, construction/update/disposal, exceptions and the API's
+   build availability. Gate: only opted-in callbacks run during explicit preview, reload removes old registrations,
+   errors identify the scratch, and a hung callback leaves Rider usable.
+8. **Later.** Host packaging and backend/RD/pipe migration, import worker, play run configurations and hot reload,
+   Game tool window, macOS/X11/fallback rendering, selection/gizmos and warm standby hosts. Plan these as separate
+   changes after the shared-host and Frozen gates pass.
