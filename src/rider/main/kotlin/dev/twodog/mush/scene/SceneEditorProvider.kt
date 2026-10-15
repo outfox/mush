@@ -1,5 +1,9 @@
 package dev.twodog.mush.scene
 
+import com.intellij.openapi.actionSystem.ActionGroup
+import com.intellij.openapi.actionSystem.AnAction
+import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.Separator
 import com.intellij.openapi.fileEditor.FileEditor
 import com.intellij.openapi.fileEditor.FileEditorPolicy
 import com.intellij.openapi.fileEditor.FileEditorProvider
@@ -21,10 +25,19 @@ class SceneEditorProvider : FileEditorProvider, DumbAware {
     override fun createEditor(project: Project, file: VirtualFile): FileEditor {
         val text = TextEditorProvider.getInstance().createEditor(project, file) as TextEditor
         val viewport = SceneViewportEditor(file, text.editor.document)
-        return TextEditorWithPreview(text, viewport, "Godot Scene", TextEditorWithPreview.Layout.SHOW_EDITOR_AND_PREVIEW)
+        return SceneSplitEditor(text, viewport)
     }
 
     override fun getEditorTypeId(): String = "mush-scene"
 
     override fun getPolicy(): FileEditorPolicy = FileEditorPolicy.HIDE_DEFAULT_EDITOR
+}
+
+private class SceneSplitEditor(text: TextEditor, private val viewport: SceneViewportEditor) :
+    TextEditorWithPreview(text, viewport, "Godot Scene", Layout.SHOW_EDITOR_AND_PREVIEW) {
+    override fun createTabActions(): Array<AnAction> =
+        viewport.viewActions + Separator.create() + super.createTabActions()
+
+    override fun createRightToolbarActionGroup(): ActionGroup? =
+        if (isShowActionsInTabs) null else DefaultActionGroup(*viewport.viewActions)
 }

@@ -251,8 +251,17 @@ Rider frontend (Kotlin, JBR)      ReSharper backend (planned)       Edit host (.
   them. The global canvas transform moves CanvasLayer UI too. Middle-drag pans 2D/UI or orbits 3D; Shift+middle-drag
   pans 3D, and the wheel zooms the selected view. Both views and visibility survive document reloads.
   Rendering filters apply to the scratch viewport; nested viewports keep their own cameras and render settings.
+  Visibility and navigation use compact icon actions beside Rider's pane-mode actions. They accept choices as soon
+  as a scene editor opens, retaining only the latest preferences until the host reports its initial view state.
+  Untouched settings use the host's defaults, including automatic 2D/3D camera selection.
+- Editor navigation must not rewrite scene-node transforms, parenting, ownership or serialized properties.
+  `PackedScene.Pack(scene)` must preserve the scene's node/property state after navigation and visibility changes;
+  editor cameras and viewport transforms live outside the packed scene. UI/2D separation by node class remains
+  deferred to editor-only rendering support, including mixed hierarchies, clipping, CanvasGroups and internal draw
+  items. Sharing a canvas renderer does not preclude such support; rewriting scene objects is not an acceptable
+  workaround.
 - `dotnet run --project spike/harness/ViewProbe` validates mixed 2D/UI/3D pixels in a hidden native window,
-  independent navigation, cursor anchoring and camera restoration after reload. `runIde` builds the spike host
+  independent navigation, cursor anchoring, unchanged packed scene state and camera restoration after reload. `runIde` builds the spike host
   before launching Rider so its command support matches the toolbar. `gradlew check` also runs a headless
   real-host protocol check; a scene load without a view-state handshake fails the check and is reported in the IDE.
 - **Later: Godot's built-in runtime select.** It offers 2D pan/zoom, 3D freelook and click/box select with outline

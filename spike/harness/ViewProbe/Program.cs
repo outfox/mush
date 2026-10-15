@@ -1,5 +1,6 @@
 using Godot;
 using Mush.Spike;
+using System.Text;
 using Engine = twodog.Engine;
 
 internal static class Program
@@ -39,19 +40,23 @@ internal static class Program
         };
         scene.AddChild(new MeshInstance3D { Mesh = mesh, MaterialOverride = material });
         var worldRect = new ColorRect { Position = new Vector2(20, 20), Size = new Vector2(40, 40), Color = Colors.Red };
-        scene.AddChild(worldRect);
+        var world2D = new Node2D { Name = "World2D" };
+        world2D.AddChild(worldRect);
+        scene.AddChild(world2D);
         var layer = new CanvasLayer();
         var uiRect = new ColorRect { Position = new Vector2(100, 20), Size = new Vector2(40, 40), Color = Colors.Green };
         layer.AddChild(uiRect);
         scene.AddChild(layer);
         root.AddChild(scene);
         tree.CurrentScene = scene;
+        OwnChildren(scene);
         var camera = new ViewCamera(root);
         camera.Attach(scene, "res://mixed.tscn");
         Check(camera.Settings.Mode == ViewMode.ThreeD, "generic mixed root selects 3D initially");
         Check(root.GetCamera2D() != null && root.GetCamera3D() != null, "both editor cameras exist");
 
         AssertFrame(red: true, green: true, blue: true);
+        var packedBeforeNavigation = PackedState(scene);
         camera.Configure(new ViewSettings(false, true, ViewMode.ThreeD));
         AssertFrame(red: false, green: false, blue: true);
         Check(worldRect.Visible && uiRect.Visible, "visibility filtering preserves scene node properties");
@@ -89,6 +94,8 @@ internal static class Program
         Check(!root.GetCamera3D()!.GlobalTransform.IsEqualApprox(before3DZoom), "3D wheel zoom moves its camera");
         Check(root.GlobalCanvasTransform.IsEqualApprox(canvasBefore3D), "3D navigation preserves 2D/UI view");
         var moved3D = root.GetCamera3D()!.GlobalTransform;
+        Check(PackedState(scene) == packedBeforeNavigation,
+            "PackedScene.Pack preserves scene properties and hierarchy after editor navigation and visibility changes");
 
         // A scene reload can activate its own cameras; the editor must take both views back without resetting them.
         root.RemoveChild(scene);
@@ -112,7 +119,7 @@ internal static class Program
 
         var errors = engine.Errors.Drain();
         Check(errors.Length == 0, $"native engine warnings/errors: {string.Join("; ", errors.Select(e => e.ToString()))}");
-        Console.WriteLine("PASS: independent 2D/UI and 3D visibility, pan/orbit/zoom, cursor anchoring and reload preservation.");
+        Console.WriteLine("PASS: 2D/UI and 3D visibility/navigation, cursor anchoring, unchanged PackedScene state and reload preservation.");
 
         void EmitInput(InputEvent input)
         {
@@ -144,6 +151,34 @@ internal static class Program
             Check(IsColor(image.GetPixel(25, 25), Colors.Red) == red, $"2D visibility={red}");
             Check(IsColor(image.GetPixel(105, 25), Colors.Green) == green, $"UI visibility={green}");
             Check(IsColor(image.GetPixel(320, 240), Colors.Blue) == blue, $"3D visibility={blue}");
+        }
+
+        void OwnChildren(Node parent)
+        {
+            foreach (var child in parent.GetChildren())
+            {
+                child.Owner = scene;
+                OwnChildren(child);
+            }
+        }
+
+        static string PackedState(Node scene)
+        {
+            using var packed = new PackedScene();
+            Check(packed.Pack(scene) == Error.Ok, "scene packs successfully");
+            using var state = packed.GetState();
+            Check(state.GetNodeCount() >= 5, "packing check includes the scene's renderable descendants");
+            var result = new StringBuilder();
+            for (var i = 0; i < state.GetNodeCount(); i++)
+            {
+                result.AppendLine($"{state.GetNodePath(i)}|{state.GetNodeName(i)}|{state.GetNodeType(i)}|{state.GetNodeOwnerPath(i)}");
+                for (var j = 0; j < state.GetNodePropertyCount(i); j++)
+                {
+                    using var value = state.GetNodePropertyValue(i, j);
+                    result.AppendLine($"{state.GetNodePropertyName(i, j)}={value}");
+                }
+            }
+            return result.ToString();
         }
 
         static bool IsColor(Color actual, Color expected) =>

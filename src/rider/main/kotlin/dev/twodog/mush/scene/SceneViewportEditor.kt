@@ -53,10 +53,11 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
     }
     private val panel = JPanel(BorderLayout())
     private var pendingView: ViewState? = null
-    private val viewControls = ViewportViewControls(JBUI.scale(4)) { state ->
+    private val viewControls = ViewportViewControls { state ->
         pendingView = state
         sendViewState()
     }
+    internal val viewActions = viewportViewActions(viewControls)
     private val syncTimer = Timer(100) { update(); pollStats() }
     private var ticks = 0
     private var lastLoad = " "
@@ -90,8 +91,6 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         })
 
         panel.add(placeholder, BorderLayout.CENTER)
-        viewControls.border = JBUI.Borders.empty(4, 0)
-        panel.add(viewControls, BorderLayout.NORTH)
         // The splitter's grab zone extends over its neighbours through the glass pane, which never sees events over
         // the native child; a lightweight margin keeps that zone on the viewport side.
         panel.border = JBUI.Borders.emptyLeft(SPLITTER_GRAB_MARGIN)
@@ -191,7 +190,7 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
     }
 
     private fun sendViewState() {
-        if (disposed || host.state != SpikeHost.State.RUNNING) return
+        if (disposed || !viewControls.hasViewState || host.state != SpikeHost.State.RUNNING) return
         pendingView?.let { if (host.send(it.command())) pendingView = null }
     }
 
@@ -206,6 +205,7 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
 
         val exe = System.getenv("MUSH_HOST_EXE")
         if (exe.isNullOrBlank()) {
+            viewControls.setAvailable(false)
             status.text = "Set MUSH_HOST_EXE to the spike host (spike/MushHost)."
             return
         }
@@ -233,9 +233,10 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
                     reloadAlarm.addRequest(::pushText, 0)
                 }
                 reply.startsWith("loaded") || reply.startsWith("error") -> {
-                    lastLoad = if (reply.startsWith("loaded") && !viewControls.hasViewState)
+                    lastLoad = if (reply.startsWith("loaded") && !viewControls.hasViewState) {
+                        viewControls.setAvailable(false)
                         "Viewport host is missing view controls. Restart using gradlew runIde."
-                    else reply
+                    } else reply
                     status.text = lastLoad
                 }
                 reply.startsWith("stats ") -> {

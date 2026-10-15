@@ -1,14 +1,5 @@
 package dev.twodog.mush.scene
 
-import java.awt.Dimension
-import java.awt.FlowLayout
-import java.awt.GridLayout
-import javax.swing.ButtonGroup
-import javax.swing.JLabel
-import javax.swing.JPanel
-import javax.swing.JRadioButton
-import javax.swing.JToggleButton
-
 internal enum class ViewMode(val wire: String) { TWO_D("2d"), THREE_D("3d") }
 
 internal data class ViewState(val show2D: Boolean, val show3D: Boolean, val mode: ViewMode) {
@@ -25,52 +16,51 @@ internal data class ViewState(val show2D: Boolean, val show3D: Boolean, val mode
     }
 }
 
-/** Visibility toggles and navigation radios deliberately do not change each other's selection. */
-internal class ViewportViewControls(gap: Int, private val onChange: (ViewState) -> Unit) : JPanel(GridLayout(2, 1, 0, gap)) {
-    internal val show2D = JToggleButton("2D (UI)", true)
-    internal val show3D = JToggleButton("3D", true)
-    internal val move2D = JRadioButton("2D (UI)", true)
-    internal val move3D = JRadioButton("3D")
-    private val buttons = listOf(show2D, show3D, move2D, move3D)
+/** Scratch-local state shared by the editor's native toolbar actions. Access on the EDT. */
+internal class ViewportViewControls(private val onChange: (ViewState) -> Unit) {
     private var initialized = false
+    private var startupShow2D: Boolean? = null
+    private var startupShow3D: Boolean? = null
+    private var startupMode: ViewMode? = null
     val hasViewState: Boolean get() = initialized
+    var state = ViewState(true, true, ViewMode.TWO_D)
+        private set
+    // These are editor preferences, so accept them while the engine and scene are still starting.
+    var isAvailable = true
+        private set
 
-    init {
-        show2D.toolTipText = "Show 2D and Controls, including CanvasLayer UI"
-        show3D.toolTipText = "Show 3D"
-        move2D.toolTipText = "Move 2D/UI: middle-drag to pan, wheel to zoom"
-        move3D.toolTipText = "Move 3D: middle-drag to orbit, Shift+middle-drag to pan, wheel to zoom"
-        ButtonGroup().apply { add(move2D); add(move3D) }
-        add(JPanel(FlowLayout(FlowLayout.LEADING, gap, 0)).apply {
-            add(JLabel("Show")); add(show2D); add(show3D)
-        })
-        add(JPanel(FlowLayout(FlowLayout.LEADING, gap, 0)).apply {
-            add(JLabel("Move")); add(move2D); add(move3D)
-        })
-        buttons.forEach { button ->
-            button.isEnabled = false
-            button.addActionListener {
-                onChange(ViewState(show2D.isSelected, show3D.isSelected,
-                    if (move3D.isSelected) ViewMode.THREE_D else ViewMode.TWO_D))
-            }
+    fun setVisible(mode: ViewMode, visible: Boolean) {
+        if (!isAvailable) return
+        if (!initialized) {
+            if (mode == ViewMode.TWO_D) startupShow2D = visible else startupShow3D = visible
         }
+        change(if (mode == ViewMode.TWO_D) state.copy(show2D = visible) else state.copy(show3D = visible))
     }
 
-    // The first successful scene load chooses the initial navigation mode. Later host replies can describe an
-    // older queued change, so they must not overwrite the user's newer selection.
-    fun initialize(state: ViewState) {
+    fun selectMode(mode: ViewMode) {
+        if (!isAvailable) return
+        // Clicking the provisional selection is still an explicit choice, even if state does not change.
+        if (!initialized) startupMode = mode
+        change(state.copy(mode = mode))
+    }
+
+    private fun change(next: ViewState) {
+        if (next == state) return
+        state = next
+        if (initialized) onChange(next)
+    }
+
+    // Keep automatic scene detection for untouched settings, but apply choices made during startup once ready.
+    // Later replies can describe an older queued change and must not overwrite newer user choices.
+    fun initialize(hostState: ViewState) {
         if (initialized) return
         initialized = true
-        show2D.isSelected = state.show2D
-        show3D.isSelected = state.show3D
-        move2D.isSelected = state.mode == ViewMode.TWO_D
-        move3D.isSelected = state.mode == ViewMode.THREE_D
-        setAvailable(true)
+        state = ViewState(startupShow2D ?: hostState.show2D, startupShow3D ?: hostState.show3D,
+            startupMode ?: hostState.mode)
+        if (isAvailable && state != hostState) onChange(state)
     }
 
     fun setAvailable(available: Boolean) {
-        buttons.forEach { it.isEnabled = available && initialized }
+        isAvailable = available
     }
-
-    override fun getMinimumSize() = Dimension(0, super.getMinimumSize().height)
 }
