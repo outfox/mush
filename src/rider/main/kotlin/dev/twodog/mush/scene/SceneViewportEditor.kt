@@ -1,6 +1,5 @@
 package dev.twodog.mush.scene
 
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.runReadActionBlocking
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.editor.Document
@@ -24,8 +23,6 @@ import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.awt.event.HierarchyEvent
 import java.beans.PropertyChangeListener
-import java.nio.file.Files
-import java.nio.file.Path
 import java.util.Base64
 import javax.swing.JComponent
 import javax.swing.JPanel
@@ -44,7 +41,8 @@ import javax.swing.Timer
 class SceneViewportEditor(private val file: VirtualFile, private val document: Document) : UserDataHolderBase(), FileEditor {
     private val resPath = GodotProject.resPath(file)!!
     private val embedding = ChildWindowEmbedding(detachInput = System.getenv("MUSH_DETACH") == "1")
-    private val host = SpikeHost(::onReply)
+    private val host = SpikeHost(::onReply, ::onHostStateChanged)
+    @Volatile private var disposed = false
     private val reloadAlarm = Alarm(Alarm.ThreadToUse.POOLED_THREAD, this)
     private val canvas = HostCanvas()
     private val placeholder = JPanel(BorderLayout())
@@ -54,6 +52,11 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         override fun getPreferredSize() = Dimension(0, super.getPreferredSize().height)
     }
     private val panel = JPanel(BorderLayout())
+    private var pendingView: ViewState? = null
+    private val viewControls = ViewportViewControls(JBUI.scale(4)) { state ->
+        pendingView = state
+        sendViewState()
+    }
     private val syncTimer = Timer(100) { update(); pollStats() }
     private var ticks = 0
     private var lastLoad = " "
@@ -87,6 +90,8 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         })
 
         panel.add(placeholder, BorderLayout.CENTER)
+        viewControls.border = JBUI.Borders.empty(4, 0)
+        panel.add(viewControls, BorderLayout.NORTH)
         // The splitter's grab zone extends over its neighbours through the glass pane, which never sees events over
         // the native child; a lightweight margin keeps that zone on the viewport side.
         panel.border = JBUI.Borders.emptyLeft(SPLITTER_GRAB_MARGIN)
@@ -94,6 +99,7 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
 
         document.addDocumentListener(object : DocumentListener {
             override fun documentChanged(event: DocumentEvent) {
+                if (disposed) return
                 reloadAlarm.cancelAllRequests()
                 reloadAlarm.addRequest(::pushText, RELOAD_DEBOUNCE_MS)
             }
@@ -126,6 +132,8 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         get() = !placeholder.isShowing || placeholder.visibleRect.isEmpty
 
     private fun update() {
+        if (disposed) return
+        sendViewState()
         val inTab = canvas.parent === placeholder
         if (collapsed) {
             if (inTab)
@@ -182,8 +190,13 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
             host.send("stats")
     }
 
+    private fun sendViewState() {
+        if (disposed || host.state != SpikeHost.State.RUNNING) return
+        pendingView?.let { if (host.send(it.command())) pendingView = null }
+    }
+
     private fun attach() {
-        if (!canvas.isDisplayable)
+        if (disposed || !canvas.isDisplayable)
             return
         if (host.isStarted) {
             if (host.hwnd != 0L)
@@ -192,7 +205,7 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         }
 
         val exe = System.getenv("MUSH_HOST_EXE")
-        if (exe.isNullOrBlank() || !Files.isRegularFile(Path.of(exe))) {
+        if (exe.isNullOrBlank()) {
             status.text = "Set MUSH_HOST_EXE to the spike host (spike/MushHost)."
             return
         }
@@ -202,32 +215,55 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
     }
 
     private fun embedHost() {
+        if (disposed || !canvas.isDisplayable || host.hwnd == 0L) return
         embedding.embed(host.hwnd, canvas)
         update()
     }
 
     private fun onReply(reply: String) {
-        when {
-            reply.startsWith("hwnd ") -> SwingUtilities.invokeLater {
-                embedHost()
-                // The editor may hold unsaved text from before the host was up.
-                pushText()
+        if (disposed) return
+        SwingUtilities.invokeLater {
+            if (disposed || host.state != SpikeHost.State.RUNNING) return@invokeLater
+            when {
+                reply.startsWith("view ") -> ViewState.parse(reply)?.let(viewControls::initialize)
+                reply.startsWith("hwnd ") -> {
+                    embedHost()
+                    // Capture and encode the initial snapshot on the same pool as debounced updates.
+                    reloadAlarm.cancelAllRequests()
+                    reloadAlarm.addRequest(::pushText, 0)
+                }
+                reply.startsWith("loaded") || reply.startsWith("error") -> {
+                    lastLoad = if (reply.startsWith("loaded") && !viewControls.hasViewState)
+                        "Viewport host is missing view controls. Restart using gradlew runIde."
+                    else reply
+                    status.text = lastLoad
+                }
+                reply.startsWith("stats ") -> {
+                    val native = if (host.hwnd != 0L) embedding.describe(host.hwnd, canvas) else "no window"
+                    status.text = "$lastLoad | ${reply.removePrefix("stats ")} | $native"
+                    status.toolTipText = status.text
+                    LOG.info("$resPath: ${status.text}")
+                }
             }
-            reply.startsWith("loaded") || reply.startsWith("error") -> SwingUtilities.invokeLater {
-                lastLoad = reply
-                status.text = reply
-            }
-            reply.startsWith("stats ") -> SwingUtilities.invokeLater {
-                val native = if (host.hwnd != 0L) embedding.describe(host.hwnd, canvas) else "no window"
-                status.text = "$lastLoad | ${reply.removePrefix("stats ")} | $native"
-                status.toolTipText = status.text
-                LOG.info("$resPath: ${status.text}")
+        }
+    }
+
+    private fun onHostStateChanged(state: SpikeHost.State, message: String?) {
+        SwingUtilities.invokeLater {
+            if (disposed || host.state != state) return@invokeLater
+            if (state == SpikeHost.State.FAILED || state == SpikeHost.State.STOPPED)
+                viewControls.setAvailable(false)
+            when (state) {
+                SpikeHost.State.STARTING -> status.text = "Starting viewport…"
+                SpikeHost.State.FAILED -> status.text = message ?: "Viewport host disconnected."
+                SpikeHost.State.STOPPED -> status.text = "Viewport stopped."
+                else -> Unit
             }
         }
     }
 
     private fun pushText() {
-        if (!host.isStarted)
+        if (disposed || !host.isStarted)
             return
         val text = runReadActionBlocking { document.text }
         // In-band, so no temp file can race the host or the editor.
@@ -254,10 +290,14 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
 
     override fun dispose() {
         LOG.info("$resPath: editor disposed")
+        disposed = true
+        reloadAlarm.cancelAllRequests()
         syncTimer.stop()
         watchTimer.stop()
-        canvas.parent?.remove(canvas)
-        ApplicationManager.getApplication().executeOnPooledThread { host.stop() }
+        pendingView = null
+        viewControls.setAvailable(false)
+        embedding.retireCanvas(canvas, host.termination)
+        host.stop()
     }
 
     private companion object {

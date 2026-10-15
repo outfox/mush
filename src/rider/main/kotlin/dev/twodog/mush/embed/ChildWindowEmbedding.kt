@@ -10,6 +10,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import javax.swing.JWindow
+import javax.swing.SwingUtilities
 
 /**
  * Hosts a foreign process's top-level window as a `WS_CHILD` of an AWT heavyweight component (Windows only).
@@ -46,6 +47,30 @@ class ChildWindowEmbedding(private val detachInput: Boolean) {
         user32.ShowWindowAsync(child, SW_HIDE)
         lastSize = null
         shown = false
+    }
+
+    /**
+     * Keeps the local Canvas peer alive until its child process exits. Call on the EDT before requesting shutdown;
+     * synchronously parking the foreign child first would wait for a debugger-suspended process in SetParent.
+     */
+    fun retireCanvas(canvas: Component, termination: CompletableFuture<*>): CompletableFuture<Unit> {
+        val released = CompletableFuture<Unit>()
+        val layeredPane = SwingUtilities.getRootPane(canvas)?.layeredPane
+        if (canvas.isDisplayable && layeredPane != null) {
+            canvas.isVisible = false
+            layeredPane.setComponentZOrder(canvas, 0)
+        }
+        termination.thenRun {
+            SwingUtilities.invokeLater {
+                try {
+                    canvas.parent?.remove(canvas)
+                    released.complete(Unit)
+                } catch (e: Exception) {
+                    released.completeExceptionally(e)
+                }
+            }
+        }
+        return released
     }
 
     /**

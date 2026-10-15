@@ -1,0 +1,23 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/sample_3d.tscn" id="1_world"]
+[ext_resource type="Texture2D" path="res://art/mush.svg" id="2_mush"]
+
+[node name="MixedView" type="Node"]
+
+[node name="World" parent="." instance=ExtResource("1_world")]
+
+[node name="Mush2D" type="Sprite2D" parent="."]
+position = Vector2(120, 180)
+texture = ExtResource("2_mush")
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="Label" type="Label" parent="UI"]
+offset_left = 20.0
+offset_top = 20.0
+offset_right = 400.0
+offset_bottom = 80.0
+theme_override_font_sizes/font_size = 20
+text = "Mixed 2D / UI / 3D
+Show and move each view independently"

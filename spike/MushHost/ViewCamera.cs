@@ -3,7 +3,7 @@ using Godot;
 namespace Mush.Spike;
 
 /// <summary>
-/// Editor camera that overrides the scene's own: middle-drag pans (2D) or orbits (3D, Shift pans), wheel zooms.
+/// Independent editor views: middle-drag pans 2D/UI or orbits 3D (Shift pans), wheel zooms the selected view.
 /// Input arrives natively in the Godot window; the root's WindowInput signal sees it before the scene does.
 /// The cameras live under the root, outside the scene, so the view carries over when edits reload the scene.
 /// </summary>
@@ -16,6 +16,11 @@ internal sealed class ViewCamera
     private Camera3D? _camera3D;
     private bool _dragging;
     private string? _scenePath;
+    private bool _modeSelected;
+    private Vector2 _offset2D;
+    private float _zoom2D = 1f;
+
+    public ViewSettings Settings { get; private set; } = new(true, true, ViewMode.TwoD);
 
     private Vector3 _target;
     private float _distance = 10f;
@@ -30,49 +35,74 @@ internal sealed class ViewCamera
 
     public void Attach(Node scene, string resPath)
     {
-        var is3D = scene is Node3D;
-        var sameView = resPath == _scenePath && (is3D ? _camera3D != null : _camera2D != null);
+        var sameView = resPath == _scenePath && _camera2D != null && _camera3D != null;
         _scenePath = resPath;
 
         // Cameras in the freshly loaded scene may have made themselves current; take the view back.
         if (sameView)
         {
-            if (is3D)
-                _camera3D!.MakeCurrent();
-            else
-                _camera2D!.MakeCurrent();
+            _camera2D!.MakeCurrent();
+            _camera3D!.MakeCurrent();
+            ApplyView();
             return;
         }
 
+        // A generic Node can contain a 3D scene too. Nested viewports own their own camera/rendering state.
+        var is3D = scene is Node3D || (scene is not CanvasItem && Contains3D(scene));
+        if (!_modeSelected)
+            Settings = Settings with { Mode = is3D ? ViewMode.ThreeD : ViewMode.TwoD };
+
+        var scenePosition = _root.GetCamera3D()?.GlobalPosition;
         _camera2D?.Free();
         _camera3D?.Free();
-        _camera2D = null;
-        _camera3D = null;
 
-        if (is3D)
+        _target = Vector3.Zero;
+        _distance = 10f;
+        _yaw = 0f;
+        _pitch = 0.4f;
+        if (scenePosition is { } position)
+            OrbitFrom(position);
+        _camera3D = new Camera3D { Name = "MushCamera3D" };
+        _root.AddChild(_camera3D);
+        _camera3D.MakeCurrent();
+        Apply3D();
+
+        // Preserve the old 2D framing; a 3D scene's UI starts at its ordinary screen coordinates.
+        var gameSize = new Vector2(
+            ProjectSettings.GetSetting("display/window/size/viewport_width").AsInt32(),
+            ProjectSettings.GetSetting("display/window/size/viewport_height").AsInt32());
+        _camera2D = new Camera2D
         {
-            _target = Vector3.Zero;
-            _distance = 10f;
-            _yaw = 0f;
-            _pitch = 0.4f;
-            if (_root.GetCamera3D() is { } sceneCamera)
-                OrbitFrom(sceneCamera.GlobalPosition);
-            _camera3D = new Camera3D { Name = "MushCamera3D" };
-            _root.AddChild(_camera3D);
-            _camera3D.MakeCurrent();
-            Apply3D();
-        }
-        else
-        {
-            // The window may not have its final size yet; the project's viewport is what the game would frame.
-            var gameSize = new Vector2(
-                ProjectSettings.GetSetting("display/window/size/viewport_width").AsInt32(),
-                ProjectSettings.GetSetting("display/window/size/viewport_height").AsInt32());
-            _camera2D = new Camera2D { Name = "MushCamera2D", Position = gameSize / 2 };
-            _root.AddChild(_camera2D);
-            _camera2D.MakeCurrent();
-        }
+            Name = "MushCamera2D",
+            AnchorMode = is3D ? Camera2D.AnchorModeEnum.FixedTopLeft : Camera2D.AnchorModeEnum.DragCenter,
+            Position = is3D ? Vector2.Zero : gameSize / 2
+        };
+        _root.AddChild(_camera2D);
+        _camera2D.MakeCurrent();
+        _offset2D = Vector2.Zero;
+        _zoom2D = 1f;
+        _dragging = false;
+        ApplyView();
     }
+
+    public void Configure(ViewSettings settings)
+    {
+        Settings = settings;
+        _modeSelected = true;
+        _dragging = false;
+        ApplyView();
+    }
+
+    private void ApplyView()
+    {
+        // Controls and Node2D share the canvas renderer. A global transform also moves CanvasLayer-based UI.
+        _root.CanvasCullMask = Settings.Show2D ? uint.MaxValue : 0;
+        _root.Disable3D = !Settings.Show3D;
+        _root.GlobalCanvasTransform = new Transform2D(0, Vector2.One * _zoom2D, 0, _offset2D);
+    }
+
+    private static bool Contains3D(Node node) => node.GetChildren().Any(child =>
+        child is not Viewport && (child is Node3D || Contains3D(child)));
 
     private void OnInput(InputEvent e)
     {
@@ -95,9 +125,10 @@ internal sealed class ViewCamera
 
     private void Drag(Vector2 delta, bool shift)
     {
-        if (_camera2D != null)
+        if (Settings.Mode == ViewMode.TwoD)
         {
-            _camera2D.Position -= delta / _camera2D.Zoom;
+            _offset2D += delta;
+            ApplyView();
         }
         else if (_camera3D != null)
         {
@@ -116,15 +147,15 @@ internal sealed class ViewCamera
         }
     }
 
-    // 2D zoom keeps the world point under the cursor fixed.
+    // Global 2D zoom keeps the point under the cursor fixed, including UI in separate CanvasLayers.
     private void Zoom(float factor, Vector2 cursor)
     {
-        if (_camera2D != null)
+        if (Settings.Mode == ViewMode.TwoD)
         {
-            var fromCenter = cursor - _root.GetVisibleRect().Size / 2;
-            var world = _camera2D.Position + fromCenter / _camera2D.Zoom;
-            _camera2D.Zoom *= factor;
-            _camera2D.Position = world - fromCenter / _camera2D.Zoom;
+            var zoom = Mathf.Clamp(_zoom2D * factor, 0.01f, 100f);
+            _offset2D = cursor - (cursor - _offset2D) * (zoom / _zoom2D);
+            _zoom2D = zoom;
+            ApplyView();
         }
         else if (_camera3D != null)
         {

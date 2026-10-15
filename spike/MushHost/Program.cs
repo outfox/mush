@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Text;
 using Godot;
 using Engine = twodog.Engine;
@@ -35,24 +34,30 @@ internal static class Program
         var camera = new ViewCamera(tree.Root);
         Emit("hwnd", DisplayServer.WindowGetNativeHandle(DisplayServer.HandleType.WindowHandle).ToString());
 
-        var commands = new ConcurrentQueue<string>();
+        var commands = new PendingCommands();
+        if (initialScene != null)
+            commands.Enqueue($"load {initialScene}");
         var reader = new Thread(() =>
         {
             while (Console.In.ReadLine() is { } line)
-                commands.Enqueue(line);
+            {
+                if (!commands.Enqueue(line))
+                    Emit("error", "host command queue is full or closing");
+            }
             commands.Enqueue("quit");
         }) { IsBackground = true, Name = "mush stdin" };
         reader.Start();
 
-        if (initialScene != null)
-            commands.Enqueue($"load {initialScene}");
-
         while (!engine.Iteration())
         {
-            while (commands.TryDequeue(out var line))
+            // Leave time for a frame even when producers keep submitting commands.
+            for (var i = 0; i < 16 && commands.TryDequeue(out var line); i++)
             {
                 if (!Execute(line, loader, camera))
+                {
                     engine.RequestQuit();
+                    break;
+                }
             }
         }
 
@@ -78,6 +83,10 @@ internal static class Program
                 case "text" when parts.Length == 3:
                     Report(parts[1], loader.Load(parts[1], Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]))), loader, camera);
                     break;
+                case "view":
+                    camera.Configure(ViewSettings.Parse(line));
+                    Emit("view", camera.Settings.Command[5..]);
+                    break;
                 // Blocks the engine thread like a debugger breakpoint would.
                 case "stall" when parts.Length == 2:
                     Thread.Sleep(int.Parse(parts[1]));
@@ -91,7 +100,7 @@ internal static class Program
                     Emit("orphans", "printed");
                     break;
                 case "stats":
-                    Emit("stats", Stats(loader.Current));
+                    Emit("stats", Stats(loader.Current, camera.Settings));
                     break;
                 default:
                     Emit("error", $"unknown command: {line}");
@@ -109,19 +118,21 @@ internal static class Program
     private static void Report(string resPath, SceneLoader.Timing timing, SceneLoader loader, ViewCamera camera)
     {
         camera.Attach(loader.Current!, resPath);
+        Emit("view", camera.Settings.Command[5..]);
         Emit("loaded", $"parse={timing.ParseMs:F1}ms instantiate={timing.InstantiateMs:F1}ms");
     }
 
     // What the window should be showing, to tell a host that draws nothing from frames that never reach the screen.
-    private static string Stats(Node? scene)
+    private static string Stats(Node? scene, ViewSettings settings)
     {
         var viewport = scene?.GetViewport();
-        var camera = viewport?.GetCamera3D() is { } c3 ? $"{c3.Name}@{c3.GlobalPosition}"
+        var camera = settings.Mode == ViewMode.ThreeD && viewport?.GetCamera3D() is { } c3 ? $"{c3.Name}@{c3.GlobalPosition}"
             : viewport?.GetCamera2D() is { } c2 ? $"{c2.Name}@{c2.GlobalPosition}" : "none";
-        var zoom = viewport?.GetCamera2D()?.Zoom.ToString() ?? "-";
+        var zoom = viewport?.GlobalCanvasTransform.X.Length().ToString("F3") ?? "-";
         return $"frames={Godot.Engine.GetFramesDrawn()} window={DisplayServer.WindowGetSize()} " +
                $"mode={DisplayServer.WindowGetMode()} scene={scene?.Name ?? "none"} nodes={CountNodes(scene)} camera={camera} " +
-               $"zoom={zoom} viewport={viewport?.GetVisibleRect().Size} drawn={Coverage(viewport)}";
+               $"zoom={zoom} canvasOffset={viewport?.GlobalCanvasTransform.Origin} {settings.Command} " +
+               $"viewport={viewport?.GetVisibleRect().Size} drawn={Coverage(viewport)}";
     }
 
     // Share of sampled pixels in the last rendered frame that differ from the clear colour.

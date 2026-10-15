@@ -39,6 +39,23 @@ sourceSets {
     }
 }
 
+tasks.test {
+    // Rider's test classloader does not provide CodeSource locations for fixture classes.
+    systemProperty("mush.test.fixtureClasspath", sourceSets.test.get().output.classesDirs.asPath)
+}
+
+val testHostCommands = tasks.register("testHostCommands") {
+    doLast {
+        providers.exec {
+            executable("dotnet")
+            args("test", "tests/MushHost.Tests/MushHost.Tests.csproj", "--nologo", "-v", "minimal")
+            workingDir(rootDir)
+        }.result.get()
+    }
+}
+
+tasks.check { dependsOn(testHostCommands) }
+
 val compileDotNet = tasks.register("compileDotNet") {
     doLast {
         providers.exec {
@@ -49,7 +66,39 @@ val compileDotNet = tasks.register("compileDotNet") {
     }
 }
 
+val compileSpikeHost = tasks.register("compileSpikeHost") {
+    doLast {
+        providers.exec {
+            executable("dotnet")
+            args("build", "spike/MushHost/MushHost.csproj", "-c", "Debug", "--nologo", "-v", "minimal")
+            workingDir(rootDir)
+        }.result.get()
+    }
+}
+
+val testHostViewProtocol = tasks.register("testHostViewProtocol") {
+    doLast {
+        // Use a separate output directory so checks can run while Rider has the development host open.
+        val hostOutput = layout.buildDirectory.dir("host-view-test").get().asFile
+        providers.exec {
+            executable("dotnet")
+            args("build", "spike/MushHost/MushHost.csproj", "-c", "Debug", "-o", hostOutput.absolutePath,
+                "--nologo", "-v", "minimal")
+            workingDir(rootDir)
+        }.result.get()
+        providers.exec {
+            executable("dotnet")
+            args("run", "--project", "spike/harness/ViewProbe", "--no-launch-profile", "--", "--host",
+                hostOutput.resolve(if (System.getProperty("os.name").startsWith("Windows")) "MushHost.exe" else "MushHost").absolutePath)
+            workingDir(rootDir)
+        }.result.get()
+    }
+}
+
+tasks.check { dependsOn(testHostViewProtocol) }
+
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     intellijPlatform {
         rider(productVersion) {
             useInstaller = false
@@ -59,6 +108,7 @@ dependencies {
 }
 
 tasks.runIde {
+    dependsOn(compileSpikeHost)
     // Match Rider's default heap size of 1.5Gb (default for runIde is 512Mb)
     maxHeapSize = "1500m"
     // Spike wiring: the sandbox opens the sample project and embeds the spike host.

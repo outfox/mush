@@ -233,8 +233,10 @@ Rider frontend (Kotlin, JBR)      ReSharper backend (planned)       Edit host (.
     tab moved to another window, re-docking, closing.
   - Before a Canvas peer is removed, park the Godot window under a never-shown AWT parking window, keeping
     `WS_CHILD`; making it a top-level popup can flash. Re-embed after the Canvas has a valid peer.
-  - On scratch close, park before removing the Canvas, then release the scratch viewport asynchronously. Closing
-    one view must not stop the shared host or wait for its message pump. Project close stops the host.
+  - On scratch close, retain the local Canvas peer while releasing the viewport asynchronously; do not wait for
+    a foreign `SetParent` before starting shutdown. The spike now retires the Canvas in its existing layered pane
+    until the child process exits. Shared-host integration must release only the chosen scratch; project close
+    stops the engine.
   - The harness's "Re-home" step checks this. Rendering resumes, with 0 host errors across re-home and close.
 - Input-queue detaching is still open. Plain B worked manually and so did detached B. Decide after a real debugger
   breakpoint in Rider, because a breakpoint suspends more than the stall command does.
@@ -244,8 +246,15 @@ Rider frontend (Kotlin, JBR)      ReSharper backend (planned)       Edit host (.
 
 ### Camera and selection
 - **v1, pure C#.** Each scratch has its own current editor `Camera2D`/`Camera3D`, outside its replaceable scene
-  subtree. That is all Godot's `CameraOverride` does. Middle-drag pans and the wheel zooms, with input arriving
-  natively in the Godot window.
+  subtree. Independent **Show 2D (UI)** and **Show 3D** toggles filter rendering; the **Move 2D (UI) / 3D** radio
+  selector chooses which view receives navigation. Controls and Node2D share the canvas renderer, so v1 groups
+  them. The global canvas transform moves CanvasLayer UI too. Middle-drag pans 2D/UI or orbits 3D; Shift+middle-drag
+  pans 3D, and the wheel zooms the selected view. Both views and visibility survive document reloads.
+  Rendering filters apply to the scratch viewport; nested viewports keep their own cameras and render settings.
+- `dotnet run --project spike/harness/ViewProbe` validates mixed 2D/UI/3D pixels in a hidden native window,
+  independent navigation, cursor anchoring and camera restoration after reload. `runIde` builds the spike host
+  before launching Rider so its command support matches the toolbar. `gradlew check` also runs a headless
+  real-host protocol check; a scene load without a view-state handshake fails the check and is reported in the IDE.
 - **Later: Godot's built-in runtime select.** It offers 2D pan/zoom, 3D freelook and click/box select with outline
   drawing (`runtime_node_select.cpp`).
   - It needs an active debugger peer (`scene_debugger.cpp:95`), and the override APIs are unbound and debug-only.
@@ -471,6 +480,28 @@ mush/
   are tested locally through `harness/` and the Rider sandbox (`gradlew :runIde`).
 - **Frontend:** IntelliJ platform tests for editor provider and session state. The Win32 embedding logic sits behind
   an interface so the harness and Rider share it.
+
+### Milestone 2 implementation and validation
+
+The spike launcher now starts and writes on a dedicated worker, coalesces pending text/stats, bounds control
+commands, observes process exit and enforces shutdown independently of its writer. Initial document encoding
+runs off the EDT, disposed editors ignore callbacks, and Canvas retirement waits asynchronously for process exit.
+The host also coalesces its incoming state and limits command work between engine iterations.
+
+- `gradlew check buildPlugin`: twelve JVM regressions and ten .NET command/state tests, plus plugin packaging.
+  Cases include pipe backpressure, graceful/forced exit, startup cancellation/failure and closed/malformed replies.
+- `spike/harness/test-p1.ps1`: Windows/JBR probe using the production launcher and Canvas-retirement helper. It
+  suspends every thread of the real host, backs up stdin, then submits diagnostics and closes from the EDT. The
+  measured close was about 3 ms; the child exited and the Canvas was released without watchdog intervention.
+- A headless real-host check submitted 1,000 snapshots during an engine-thread stall: one reload applied the final
+  snapshot, and graceful quit completed.
+- The full Rider debugger gate remains open: attachment and unexpected Canvas peer recreation still contain
+  synchronous native reparenting. The suspension probe validates retirement, not every tab/move/focus path.
+- Rider sandbox QA (2026-10-15): text-only, split and viewport-only buttons worked on the restored scene tab;
+  the detached editor also switched layouts and rendered. The reported intermittent first-tab failure remains
+  unresolved. A control run with mush absent, empty plugin paths and no `MushHost` reproduced the shutdown
+  `HighlightingPanel`/`ROOT_DISPOSABLE` leak and detached text editor's `LineStatusTrackerManager` warning.
+  These diagnostics occur independently of mush. The separate shutdown self-wait exception was not reproduced.
 
 ## Milestones
 
