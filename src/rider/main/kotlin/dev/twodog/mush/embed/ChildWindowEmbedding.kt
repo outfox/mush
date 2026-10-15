@@ -1,5 +1,6 @@
 package dev.twodog.mush.embed
 
+import com.intellij.openapi.diagnostic.logger
 import com.sun.jna.Library
 import com.sun.jna.Native
 import com.sun.jna.Pointer
@@ -55,11 +56,13 @@ class ChildWindowEmbedding(private val detachInput: Boolean) {
         val rect = clientRect(Native.getComponentID(parent))
         val visible = parent.isShowing && rect.width > 0 && rect.height > 0
         if (visible && (!shown || rect != lastSize)) {
+            LOG.info("sync: ${if (shown) "resize" else "show"} $rect")
             val show = if (shown) 0 else SWP_SHOWWINDOW or SWP_FRAMECHANGED
             user32.SetWindowPos(child, 0, 0, 0, rect.width, rect.height, SWP_NOZORDER or SWP_NOACTIVATE or SWP_ASYNCWINDOWPOS or show)
             lastSize = rect
             shown = true
         } else if (!visible && shown) {
+            LOG.info("sync: hide")
             user32.ShowWindowAsync(child, SW_HIDE)
             shown = false
         }
@@ -79,8 +82,29 @@ class ChildWindowEmbedding(private val detachInput: Boolean) {
         try {
             resize.get(timeoutMs, TimeUnit.MILLISECONDS)
             lastSize = rect
+            LOG.info("resizeBeforeShow: $rect")
         } catch (_: TimeoutException) {
             lastSize = null
+            LOG.info("resizeBeforeShow: timed out at $rect")
+        }
+    }
+
+    /** The child's actual native state next to what this class believes, for diagnostics. */
+    fun describe(child: Long, parent: Component): String {
+        val r = IntArray(4)
+        user32.GetWindowRect(child, r)
+        val parentHwnd = if (parent.isDisplayable) Native.getComponentID(parent) else 0L
+        return "visible=${user32.IsWindowVisible(child)} inParent=${user32.GetParent(child) == parentHwnd} " +
+            "size=${r[2] - r[0]}x${r[3] - r[1]} shown=$shown lastSize=${lastSize?.let { "${it.width}x${it.height}" }}"
+    }
+
+    /** True when the component's window region is empty, i.e. AWT's lightweight mixing has cut all of it away. */
+    fun isCutAway(component: Component): Boolean {
+        val region = gdi32.CreateRectRgn(0, 0, 0, 0)
+        try {
+            return user32.GetWindowRgn(Native.getComponentID(component), region) == NULLREGION
+        } finally {
+            gdi32.DeleteObject(region)
         }
     }
 
@@ -109,12 +133,24 @@ class ChildWindowEmbedding(private val detachInput: Boolean) {
         fun SetWindowPos(hwnd: Long, after: Long, x: Int, y: Int, cx: Int, cy: Int, flags: Int): Boolean
         fun ShowWindowAsync(hwnd: Long, command: Int): Boolean
         fun GetClientRect(hwnd: Long, rect: IntArray): Boolean
+        fun GetWindowRect(hwnd: Long, rect: IntArray): Boolean
+        fun GetParent(hwnd: Long): Long
+        fun IsWindowVisible(hwnd: Long): Boolean
         fun GetWindowThreadProcessId(hwnd: Long, processId: Pointer?): Int
         fun AttachThreadInput(from: Int, to: Int, attach: Boolean): Boolean
+        fun GetWindowRgn(hwnd: Long, region: Long): Int
+    }
+
+    @Suppress("FunctionName")
+    private interface Gdi32 : Library {
+        fun CreateRectRgn(left: Int, top: Int, right: Int, bottom: Int): Long
+        fun DeleteObject(handle: Long): Boolean
     }
 
     private companion object {
         val user32: User32 by lazy { Native.load("user32", User32::class.java) }
+        val gdi32: Gdi32 by lazy { Native.load("gdi32", Gdi32::class.java) }
+        val LOG = logger<ChildWindowEmbedding>()
 
         const val GWL_STYLE = -16
         const val WS_CHILD = 0x40000000L
@@ -132,5 +168,6 @@ class ChildWindowEmbedding(private val detachInput: Boolean) {
         const val SWP_SHOWWINDOW = 0x40
         const val SWP_ASYNCWINDOWPOS = 0x4000
         const val SW_HIDE = 0
+        const val NULLREGION = 1
     }
 }

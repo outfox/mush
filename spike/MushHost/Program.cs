@@ -27,6 +27,9 @@ internal static class Program
         using var engine = new Engine("mush", args: godotArgs.ToArray());
         engine.Start();
 
+        // Diagnostics: blue is Godot's frame, grey is the IDE behind it.
+        RenderingServer.SetDefaultClearColor(new Color(0.15f, 0.25f, 0.45f));
+
         var tree = engine.Tree;
         var loader = new SceneLoader(tree);
         var camera = new ViewCamera(tree.Root);
@@ -87,6 +90,9 @@ internal static class Program
                     Node.PrintOrphanNodes();
                     Emit("orphans", "printed");
                     break;
+                case "stats":
+                    Emit("stats", Stats(loader.Current));
+                    break;
                 default:
                     Emit("error", $"unknown command: {line}");
                     break;
@@ -104,6 +110,38 @@ internal static class Program
     {
         camera.Attach(loader.Current!, resPath);
         Emit("loaded", $"parse={timing.ParseMs:F1}ms instantiate={timing.InstantiateMs:F1}ms");
+    }
+
+    // What the window should be showing, to tell a host that draws nothing from frames that never reach the screen.
+    private static string Stats(Node? scene)
+    {
+        var viewport = scene?.GetViewport();
+        var camera = viewport?.GetCamera3D() is { } c3 ? $"{c3.Name}@{c3.GlobalPosition}"
+            : viewport?.GetCamera2D() is { } c2 ? $"{c2.Name}@{c2.GlobalPosition}" : "none";
+        var zoom = viewport?.GetCamera2D()?.Zoom.ToString() ?? "-";
+        return $"frames={Godot.Engine.GetFramesDrawn()} window={DisplayServer.WindowGetSize()} " +
+               $"mode={DisplayServer.WindowGetMode()} scene={scene?.Name ?? "none"} nodes={CountNodes(scene)} camera={camera} " +
+               $"zoom={zoom} viewport={viewport?.GetVisibleRect().Size} drawn={Coverage(viewport)}";
+    }
+
+    // Share of sampled pixels in the last rendered frame that differ from the clear colour.
+    private static string Coverage(Viewport? viewport)
+    {
+        using var image = viewport?.GetTexture().GetImage();
+        if (image is null || image.IsEmpty())
+            return "-";
+        var clear = RenderingServer.GetDefaultClearColor();
+        int samples = 0, drawn = 0;
+        for (var y = 0; y < image.GetHeight(); y += 16)
+        for (var x = 0; x < image.GetWidth(); x += 16)
+        {
+            samples++;
+            var p = image.GetPixel(x, y);
+            if (Math.Abs(p.R - clear.R) + Math.Abs(p.G - clear.G) + Math.Abs(p.B - clear.B) > 0.03f)
+                drawn++;
+        }
+
+        return $"{100 * drawn / Math.Max(samples, 1)}%@{image.GetWidth()}x{image.GetHeight()}";
     }
 
     private static int CountNodes(Node? node) =>

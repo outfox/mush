@@ -64,7 +64,11 @@ internal sealed class ViewCamera
         }
         else
         {
-            _camera2D = new Camera2D { Name = "MushCamera2D", Position = _root.GetVisibleRect().Size / 2 };
+            // The window may not have its final size yet; the project's viewport is what the game would frame.
+            var gameSize = new Vector2(
+                ProjectSettings.GetSetting("display/window/size/viewport_width").AsInt32(),
+                ProjectSettings.GetSetting("display/window/size/viewport_height").AsInt32());
+            _camera2D = new Camera2D { Name = "MushCamera2D", Position = gameSize / 2 };
             _root.AddChild(_camera2D);
             _camera2D.MakeCurrent();
         }

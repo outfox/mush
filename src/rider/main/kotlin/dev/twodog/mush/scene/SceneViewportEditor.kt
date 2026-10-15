@@ -2,6 +2,7 @@ package dev.twodog.mush.scene
 
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.runReadActionBlocking
+import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.event.DocumentEvent
 import com.intellij.openapi.editor.event.DocumentListener
@@ -47,11 +48,19 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
     private val reloadAlarm = Alarm(Alarm.ThreadToUse.POOLED_THREAD, this)
     private val canvas = HostCanvas()
     private val placeholder = JPanel(BorderLayout())
-    private val status = JBLabel(" ")
+    // A label's text width would become the panel's minimum width and pin the editor splitter.
+    private val status = object : JBLabel(" ") {
+        override fun getMinimumSize() = Dimension(0, super.getMinimumSize().height)
+        override fun getPreferredSize() = Dimension(0, super.getPreferredSize().height)
+    }
     private val panel = JPanel(BorderLayout())
-    private val syncTimer = Timer(100) { update() }
+    private val syncTimer = Timer(100) { update(); pollStats() }
+    private var ticks = 0
+    private var lastLoad = " "
+    private var lastRemix = 0L
 
     init {
+        LOG.info("$resPath: editor created")
         // A heavyweight's minimum size defaults to its current size, which pins the editor splitter.
         canvas.minimumSize = Dimension(0, 0)
         canvas.preferredSize = JBUI.size(320, 240)
@@ -87,7 +96,7 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
     /** Paints Godot's default clear colour, so a frame where the child lags behind a resize does not flash. */
     private inner class HostCanvas : Canvas() {
         override fun paint(g: Graphics) {
-            g.color = GODOT_CLEAR_COLOR
+            g.color = CANVAS_COLOR
             g.fillRect(0, 0, width, height)
         }
 
@@ -104,8 +113,9 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         }
     }
 
+    // The visible rect also accounts for collapsed ancestors whose children still carry stale sizes.
     private val collapsed: Boolean
-        get() = !placeholder.isShowing || placeholder.width == 0 || placeholder.height == 0
+        get() = !placeholder.isShowing || placeholder.visibleRect.isEmpty
 
     private fun update() {
         val inTab = canvas.parent === placeholder
@@ -114,6 +124,8 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
                 stepOut()
         } else if (!inTab) {
             stepIn()
+        } else {
+            remixIfCutAway()
         }
         if (host.hwnd != 0L && canvas.isDisplayable)
             embedding.sync(host.hwnd, canvas)
@@ -121,16 +133,42 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
 
     private fun stepOut() {
         val layeredPane = SwingUtilities.getRootPane(placeholder)?.layeredPane ?: return
+        LOG.info("$resPath: step out")
         canvas.isVisible = false
         layeredPane.setComponentZOrder(canvas, 0)
     }
 
     private fun stepIn() {
+        LOG.info("$resPath: step in at ${placeholder.width}x${placeholder.height}")
         placeholder.setComponentZOrder(canvas, 0)
         placeholder.validate()
         if (host.hwnd != 0L && canvas.isDisplayable)
             embedding.resizeBeforeShow(host.hwnd, canvas, RESIZE_BEFORE_SHOW_TIMEOUT_MS)
         canvas.isVisible = true
+    }
+
+    /**
+     * AWT clips a heavyweight's window region to its lightweight ancestors and cuts out lightweights above it. A shape
+     * computed while an ancestor was still collapsed can stay empty, hiding the viewport; showing the Canvas again
+     * makes AWT recompute it, which needs a valid parent.
+     */
+    private fun remixIfCutAway() {
+        if (!canvas.isShowing || !embedding.isCutAway(canvas))
+            return
+        val now = System.nanoTime()
+        if (now - lastRemix < REMIX_INTERVAL_NS)
+            return
+        lastRemix = now
+        LOG.info("$resPath: canvas region was empty, remixing")
+        canvas.isVisible = false
+        placeholder.validate()
+        canvas.isVisible = true
+    }
+
+    // Diagnostics for the viewport that stays grey after tab switches.
+    private fun pollStats() {
+        if (++ticks % STATS_TICKS == 0 && host.isStarted && placeholder.isShowing)
+            host.send("stats")
     }
 
     private fun attach() {
@@ -164,8 +202,15 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
                 // The editor may hold unsaved text from before the host was up.
                 pushText()
             }
-            reply.startsWith("loaded") || reply.startsWith("error") -> {
-                SwingUtilities.invokeLater { status.text = reply }
+            reply.startsWith("loaded") || reply.startsWith("error") -> SwingUtilities.invokeLater {
+                lastLoad = reply
+                status.text = reply
+            }
+            reply.startsWith("stats ") -> SwingUtilities.invokeLater {
+                val native = if (host.hwnd != 0L) embedding.describe(host.hwnd, canvas) else "no window"
+                status.text = "$lastLoad | ${reply.removePrefix("stats ")} | $native"
+                status.toolTipText = status.text
+                LOG.info("$resPath: ${status.text}")
             }
         }
     }
@@ -197,6 +242,7 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
     override fun removePropertyChangeListener(listener: PropertyChangeListener) {}
 
     override fun dispose() {
+        LOG.info("$resPath: editor disposed")
         syncTimer.stop()
         canvas.parent?.remove(canvas)
         ApplicationManager.getApplication().executeOnPooledThread { host.stop() }
@@ -206,8 +252,15 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
         const val RELOAD_DEBOUNCE_MS = 120
         const val SPLITTER_GRAB_MARGIN = 4
         const val RESIZE_BEFORE_SHOW_TIMEOUT_MS = 50L
+        const val STATS_TICKS = 10
+        // A lightweight covering the whole viewport legitimately empties the region; don't toggle it every tick.
+        const val REMIX_INTERVAL_NS = 1_000_000_000L
+        val LOG = logger<SceneViewportEditor>()
 
         // Godot's default clear colour (0.3, 0.3, 0.3); later the host should report the project's own.
         val GODOT_CLEAR_COLOR = Color(0x4D, 0x4D, 0x4D)
+
+        // One blue step off, so a screen capture tells the Canvas from Godot's frames.
+        val CANVAS_COLOR = Color(0x4D, 0x4D, 0x4E)
     }
 }
