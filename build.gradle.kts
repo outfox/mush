@@ -29,7 +29,7 @@ repositories {
 version = providers.gradleProperty("PluginVersion").get()
 
 tasks.processResources {
-    from("dependencies.json") { into("META-INF") }
+    from(files("dependencies.json", "THIRD_PARTY_NOTICES.md")) { into("META-INF") }
 }
 
 sourceSets {
