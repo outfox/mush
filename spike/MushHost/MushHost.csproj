@@ -11,9 +11,13 @@
     </PropertyGroup>
 
     <PropertyGroup>
+        <!-- The sample is only the development default. Reference the game's assembly, never its standalone host.
+             Override with /p:MushGameProject=/path/to/Game.csproj (or gradlew -PMushGameProject=... runIde). -->
+        <MushGameProject Condition="'$(MushGameProject)' == ''">$(MSBuildThisFileDirectory)../../samples/MushSample/MushSample.csproj</MushGameProject>
+        <MushGameProject>$([System.IO.Path]::GetFullPath('$(MushGameProject)'))</MushGameProject>
         <!-- No trailing separator: 2dog's import command quotes this path, and a trailing backslash would escape the
              closing quote on Windows. -->
-        <MushGameDir>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../samples/MushSample'))</MushGameDir>
+        <MushGameDir>$([System.IO.Path]::GetDirectoryName('$(MushGameProject)'))</MushGameDir>
         <TwoDogVersion>4.7.2.119</TwoDogVersion>
         <GodotProjectDir>$(MushGameDir)</GodotProjectDir>
         <TwoDogVariant>editor</TwoDogVariant>
@@ -22,6 +26,6 @@
 
     <ItemGroup>
         <PackageReference Include="2dog.engine" Version="$(TwoDogVersion)"/>
-        <ProjectReference Include="$(MushGameDir)/MushSample.csproj"/>
+        <ProjectReference Include="$(MushGameProject)"/>
     </ItemGroup>
 </Project>

@@ -170,13 +170,81 @@ Rider frontend (Kotlin, JBR)      ReSharper backend (planned)       Edit host (.
 | Windows | Host's Godot window kept over a heavyweight AWT `Canvas` (see below) | 0 | Prior art: Godot 4.4+ game embedding, 2dog WinForms `--wid` |
 | macOS | Host's `CAContextID` → `CALayerHost` in a JAWT surface layer (private API) | 0 | Prior art: Godot 4.5 macOS embedding (`DisplayServerMacOSEmbedded`) |
 | macOS alt | IOSurface `MTLTexture` → JBR `SharedTextures.wrapTexture` | 1 GPU blit | 2dog already allocates IOSurfaces |
-| Linux X11 | `XReparentWindow` into Canvas | 0 | Prior art: Godot 4.4 |
-| Wayland / remote dev | Shared-memory frames (2dog `CpuPresenter` readback) | CPU | Fallback only |
+| Linux X11 / XWayland | X11 reparenting into Canvas through JNA/XCB | 0 | Implemented in the spike; native regression probe below |
+| Native Wayland | 2dog exported Vulkan memory → EGL importer → JBR-owned subsurface | No CPU frame readback; producer GPU blit | Experimental cross-process proof passes on WSLg/Mesa software devices; scene-editor backend remains disabled |
+| Remote dev / GPU-sharing fallback | Shared-memory frames (2dog `CpuPresenter` readback) | CPU | Planned fallback |
 
 - With a native child window, Godot presents through its own swapchain and receives input natively. Nothing is
   forwarded and no texture is shared.
-- 2dog's Avalonia path is less "zero-copy" than this: it does one GPU copy plus a CPU stall per frame. It is not worth
-  porting into JBR, which has no D3D or Vulkan texture import.
+- 2dog already implements GPU texture sharing for Avalonia, including Linux/Wayland. The Linux presenter creates
+  an external Vulkan texture, exports its memory as an opaque POSIX file descriptor, and imports that memory into
+  Avalonia's compositor without CPU readback. `EglExternalObjectsShim` enables the compositor's external-object
+  import feature for EGL contexts, including Wayland. The current producer blits the viewport into the shared
+  texture and waits for GPU completion; that synchronization/copy cost does not make CPU frame transport necessary.
+- Wayland's lack of foreign-window reparenting only rules out the current child-window backend. A GPU-sharing
+  backend is a separate, viable direction. Mush still needs a Rider/JBR consumer, matching GPU/device and image
+  metadata, frame synchronization/lifetime handling, and cross-process handle transport (e.g. Unix-domain sockets
+  with `SCM_RIGHTS` for Linux file descriptors). Avalonia currently hosts its engine and compositor in one process;
+  passing a numeric fd over Mush's text protocol would not transfer the underlying resource to Rider.
+- JBR's documented `SharedTextures.wrapTexture` API currently exposes Metal textures; its documented `Vulkan`
+  service exposes device enumeration/presentation status, not an external-memory image importer. This identifies
+  the integration gap to investigate, rather than proving that Linux GPU import is impossible or unworthwhile.
+  Sources: [SharedTextures](https://jetbrains.github.io/JetBrainsRuntimeApi/jetbrains.runtime.api/com/jetbrains/SharedTextures.html),
+  [Vulkan](https://jetbrains.github.io/JetBrainsRuntimeApi/jetbrains.runtime.api/com/jetbrains/Vulkan.html).
+
+### Native Wayland GPU-sharing spike
+
+The first implementation reuses 2dog's existing external-texture producer and adds a small Linux native consumer
+in `spike/native/mush_gpu.c`. A same-user Unix `SOCK_SEQPACKET` channel transfers opaque memory fds with `SCM_RIGHTS`;
+metadata identifies the allocation, device/driver UUIDs, resource generation and frame sequence. One leased frame
+at a time prevents overwrites and unbounded work when the consumer stops. The producer stays in its own .NET/Godot
+process and the consumer imports the allocation into EGL/OpenGL ES, with no CPU frame transport.
+
+An opt-in JBR adapter creates a native Wayland subsurface using the private APIs of Rider's exact JBR
+25.0.4/b508.27. The offscreen importer and actual JBR subsurface presentation have passed real cross-process tests
+under WSLg using Mesa software devices, including colors/orientation, resource resizing and shutdown. This is a
+feasibility proof, not hardware-driver certification or a completed scene-editor backend. Swing overlay/popup
+clipping, HiDPI, input forwarding, editor lifecycle, device loss and native-library packaging remain to be proved.
+
+No Godot or 2dog source changes were needed for that proof. Before production integration, discuss an opt-in API
+for complete allocation metadata and render-graph-aware external image ownership/layout handoff. The current
+all-frames producer wait and `glFinish` consumer acknowledgement are conservative spike synchronization; successful
+Mesa tests do not prove portable Vulkan/OpenGL handoff. Exported GPU semaphores can remove these waits in a later
+step. The proposed changes and reproducible commands are in [the native spike notes](spike/native/README.md).
+
+### Linux embedding and development
+
+- `ChildWindowEmbedding` selects Win32 or X11 from the actual AWT toolkit. Linux hosts receive
+  `--display-driver x11`, so a project's preference for native Wayland cannot produce an incompatible window handle.
+  A Wayland desktop works when Rider uses XWayland (`sun.awt.X11.XToolkit`). Rider's native Wayland toolkit is
+  currently unsupported; the scene text editor remains usable and the viewport explains the requirement.
+- The X11 backend uses a private XCB connection and checked requests. A host exiting between a window-handle
+  reply and an embedding request produces a local BadWindow error, without changing AWT's global Xlib handler.
+  Reparent, map, hide and resize are handled by the X server even while the host is debugger-suspended. Native
+  parent geometry supplies physical pixels at scaled display settings. The same parking and asynchronous Canvas
+  retirement rules as Windows preserve the host window across Canvas peer recreation and editor close.
+- On Linux, install the .NET 10 SDK and X11/XCB runtime libraries, then use `sh ./gradlew runIde`. Gradle provisions
+  the required Java toolchain; `runIde` builds and launches the Linux `MushHost` apphost. Rider 2026.x selects native
+  Wayland by default in a Wayland session. To use Mush's X11 embedding there, add `-Dawt.toolkit.name=XToolkit` in
+  Help > Edit Custom VM Options and restart Rider. Removing a `WLToolkit` override alone does not force X11.
+- Mush owns the host in `spike/MushHost`; it never references `samples/MushSample/MushSample.2dog`. The sample game
+  assembly is only the development default. Use `sh ./gradlew -PMushGameProject=/path/to/Game.csproj runIde` to
+  build Mush's host against another Godot game and open that project. For a direct build, pass
+  `/p:MushGameProject=/path/to/Game.csproj` to `dotnet build spike/MushHost`. The selected project currently needs
+  versions compatible with the spike's pinned 2dog package. Automatic per-project host generation/version resolution
+  remains part of the backend milestones; this override does not implement it.
+- `sh ./gradlew check` runs portable frontend, host-command and headless real-host protocol checks.
+  `sh ./gradlew testLinuxEmbedding` additionally requires an X11/XWayland display (or Xvfb). It exercises the
+  production embedding facade against a foreign Java window, including hiding, resizing, Canvas peer recreation,
+  SIGSTOP/SIGCONT suspension, a dead child window and deferred Canvas retirement. Pass
+  `-PMushTestHost=/path/to/MushHost` to repeat it with a real host built against the sample game. Both modes have
+  passed on Linux under WSLg/XWayland, as has the Linux real-host protocol check. Keyboard focus and Rider debugger
+  interaction still need Linux Rider sandbox QA.
+- The native camera/pixel regression uses dummy audio and accepts additional Godot arguments. On WSLg, use
+  `dotnet run --project spike/harness/ViewProbe -- --rendering-driver opengl3_es` for EGL; the default GLX driver can
+  report unsupported VSync and fail the probe's strict warning check. The EGL rendering regression and an independent
+  game-project host build (without a game-local host, in a path containing spaces) have passed on Linux.
+
 ### Windows embedding (decided: B, a true child window)
 **A. Godot's own way: an owned popup.**
 - The host runs Godot with `--wid <JBR frame HWND>` (main.cpp:2305). Godot then creates a borderless `WS_POPUP` owned
@@ -467,7 +535,7 @@ views to sessions rather than owning processes.
 ```
 mush/
   protocol/                    rd model (Kotlin DSL), from the resharper-rider-plugin template
-  src/rider/                   Kotlin frontend: FileEditorProvider, viewport component, Win32 embedding (JNA)
+  src/rider/                   Kotlin frontend: FileEditorProvider, viewport component, Win32/X11 embedding (JNA)
   src/dotnet/
     ReSharperPlugin.Mush/      backend: project detection, hidden host generation and build, host supervision
     Mush.Contracts/            net8.0 messages shared by backend, host and worker
@@ -487,7 +555,7 @@ mush/
   - import routing, Godot-editor detection
 - **CI:** Windows runner, headless. 2dog notes that lavapipe present fails on Windows CI, so rendering and embedding
   are tested locally through `harness/` and the Rider sandbox (`gradlew :runIde`).
-- **Frontend:** IntelliJ platform tests for editor provider and session state. The Win32 embedding logic sits behind
+- **Frontend:** IntelliJ platform tests for editor provider and session state. The native embedding logic sits behind
   an interface so the harness and Rider share it.
 
 ### Milestone 2 implementation and validation

@@ -34,7 +34,7 @@ import javax.swing.Timer
  * Unsaved document text is pushed to the host on a short debounce.
  *
  * Editor tabs collapse a tab being hidden to (0, 0, 0, 0) and remove it from the hierarchy once focus settles,
- * which would destroy the Canvas HWND on every tab switch. On collapse, the Canvas steps out into the window's
+ * which would destroy the Canvas native window on every tab switch. On collapse, the Canvas steps out into the window's
  * layered pane through `setComponentZOrder`, which moves a heavyweight without recreating its peer, and steps back
  * in the same way when the tab shows again.
  */
@@ -197,6 +197,12 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
     private fun attach() {
         if (disposed || !canvas.isDisplayable)
             return
+        embedding.unsupportedReason?.let {
+            viewControls.setAvailable(false)
+            status.text = it
+            status.toolTipText = it
+            return
+        }
         if (host.isStarted) {
             if (host.hwnd != 0L)
                 embedHost()
@@ -210,7 +216,7 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
             return
         }
         val size = embedding.clientSize(canvas)
-        host.start(listOf(exe, "--mush-scene", resPath, "--hidden-window",
+        host.start(listOf(exe) + embedding.hostArguments + listOf("--mush-scene", resPath, "--hidden-window",
             "--resolution", "${size.width.coerceAtLeast(64)}x${size.height.coerceAtLeast(64)}"))
     }
 

@@ -11,7 +11,10 @@ public final class HostProcessFixture {
         System.out.println("mush:hwnd 12345");
         System.out.flush();
         if (args[0].equals("closed-output")) {
+            // The launcher merges stderr into stdout. On POSIX these are separate file descriptors; both must
+            // close before the reader sees EOF, even though they write to the same pipe.
             System.out.close();
+            System.err.close();
             Thread.sleep(60_000);
             return;
         }

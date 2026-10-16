@@ -12,5 +12,6 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" PrivateAssets="all" />
     <Compile Include="../../spike/MushHost/PendingCommands.cs" Link="PendingCommands.cs" />
     <Compile Include="../../spike/MushHost/ViewSettings.cs" Link="ViewSettings.cs" />
+    <Compile Include="../../spike/MushHost/GpuFrameProtocol.cs" Link="GpuFrameProtocol.cs" />
   </ItemGroup>
 </Project>

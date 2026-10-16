@@ -15,7 +15,7 @@ internal static class Program
         }
         // Native rendering/input regression: exercises the production camera against mixed content without Rider or
         // desktop input automation. Run with: dotnet run --project spike/harness/ViewProbe
-        using var engine = new Engine("mush view probe", args: ["--hidden-window", "--resolution", "640x480"])
+        using var engine = new Engine("mush view probe", args: ["--hidden-window", "--resolution", "640x480", "--audio-driver", "Dummy", ..args])
         {
             CaptureErrors = true
         };
