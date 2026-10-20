@@ -1,26 +1,39 @@
 package dev.twodog.mush.embed
 
 import java.awt.Component
+import java.awt.Dimension
 import java.awt.Rectangle
 import java.awt.Toolkit
 import java.util.concurrent.CompletableFuture
 import javax.swing.SwingUtilities
 
 /** Native child-window operations are selected lazily, so Linux never loads Win32 libraries. */
-class ChildWindowEmbedding(detachInput: Boolean) {
+/**
+ * [resizeHost] is how a backend that cannot resize the child window itself gets the size to the host process.
+ * Win32 and X11 reshape the child directly and never call it.
+ */
+class ChildWindowEmbedding @JvmOverloads constructor(
+    detachInput: Boolean,
+    resizeHost: (Dimension) -> Boolean = { false },
+) {
     private val platform = WindowPlatform.detect(System.getProperty("os.name"), Toolkit.getDefaultToolkit().javaClass.name)
     private val native = lazy {
         when (platform) {
             WindowPlatform.WINDOWS -> WindowsWindowEmbedding(detachInput)
             WindowPlatform.X11 -> X11WindowEmbedding()
+            WindowPlatform.MACOS -> LayerHostEmbedding(resizeHost)
             WindowPlatform.UNSUPPORTED -> error(unsupportedReason!!)
         }
     }
 
     val unsupportedReason: String?
-        get() = if (platform == WindowPlatform.UNSUPPORTED)
-            "Viewport embedding requires Windows or Linux with Rider using X11/XWayland. Restart Rider with its X11 toolkit."
-        else null
+        get() = when {
+            platform == WindowPlatform.UNSUPPORTED ->
+                "Viewport embedding requires Windows, macOS, or Linux with Rider using X11/XWayland. " +
+                    "Restart Rider with its X11 toolkit."
+            platform == WindowPlatform.MACOS && !MushNative.isAvailable -> MushNative.failure
+            else -> null
+        }
 
     val hostArguments: List<String> get() = platform.hostArguments
 
@@ -67,7 +80,7 @@ internal interface NativeWindowEmbedding : AutoCloseable {
 }
 
 internal enum class WindowPlatform {
-    WINDOWS, X11, UNSUPPORTED;
+    WINDOWS, X11, MACOS, UNSUPPORTED;
 
     val hostArguments: List<String>
         get() = if (this == X11) listOf("--display-driver", "x11") else emptyList()
@@ -76,6 +89,7 @@ internal enum class WindowPlatform {
         fun detect(osName: String, toolkitName: String): WindowPlatform = when {
             osName.startsWith("Windows") -> WINDOWS
             osName == "Linux" && toolkitName == "sun.awt.X11.XToolkit" -> X11
+            osName.startsWith("Mac") && toolkitName == "sun.lwawt.macosx.LWCToolkit" -> MACOS
             else -> UNSUPPORTED
         }
     }

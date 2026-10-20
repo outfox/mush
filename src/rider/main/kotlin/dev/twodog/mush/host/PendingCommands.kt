@@ -9,6 +9,8 @@ internal class PendingCommands(private val capacity: Int = 32) {
         val key = when {
             command.startsWith("text ") -> "text "
             command.startsWith("view ") -> "view "
+            // A drag-resize queues one of these per sync tick, and every superseded size would resize the engine.
+            command.startsWith("resolution ") -> "resolution "
             command == "stats" -> "stats"
             else -> null
         }

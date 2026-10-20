@@ -6,6 +6,8 @@
         <OutputType>Exe</OutputType>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <!-- The Dock-tile suppression swaps an Objective-C method implementation, which needs a function pointer. -->
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <IsPackable>false</IsPackable>
         <ApplicationManifest>app.manifest</ApplicationManifest>
     </PropertyGroup>

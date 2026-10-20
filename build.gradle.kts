@@ -1,5 +1,6 @@
 import com.jetbrains.plugin.structure.base.utils.isFile
 import org.jetbrains.intellij.platform.gradle.Constants
+import org.jetbrains.intellij.platform.gradle.tasks.PrepareSandboxTask
 
 plugins {
     id("java")
@@ -13,6 +14,8 @@ val productVersion = providers.gradleProperty("ProductVersion").get()
 val dotnetPluginId = providers.gradleProperty("DotnetPluginId").get()
 val publishToken = providers.gradleProperty("PublishToken").get()
 val hostExecutableName = if (System.getProperty("os.name").startsWith("Windows")) "MushHost.exe" else "MushHost"
+val isMac = System.getProperty("os.name").startsWith("Mac")
+
 // The sample is a runIde fixture. Mush's own host can reference any Godot game project; no game-local host is needed.
 val mushGameProject = providers.gradleProperty("MushGameProject")
     .map { file(it) }.getOrElse(file("samples/MushSample/MushSample.csproj"))
@@ -31,6 +34,25 @@ repositories {
 }
 
 version = providers.gradleProperty("PluginVersion").get()
+
+// macOS AWT is lightweight, so a Canvas owns no native view for JNA to read the way Win32 and X11 components do.
+// JAWT hands one out instead, and its entry points take a JNIEnv, so this has to be a JNI library.
+val compileMacNative = tasks.register("compileMacNative") {
+    group = "build"
+    description = "Build the macOS Core Animation layer host the scene editor embeds through JAWT."
+    onlyIf { isMac }
+    inputs.files("src/rider/native/macos/mush_embed.m", "src/rider/native/macos/build.sh")
+    outputs.file(layout.buildDirectory.file("native/libmush_embed.dylib"))
+    doLast {
+        providers.exec {
+            executable("sh")
+            args("src/rider/native/macos/build.sh", layout.buildDirectory.dir("native").get().asFile.absolutePath)
+            // The script only needs the JDK's JNI and JAWT headers; JNI is ABI-stable across the versions here.
+            environment("JAVA_HOME", System.getProperty("java.home"))
+            workingDir(rootDir)
+        }.result.get()
+    }
+}
 
 tasks.processResources {
     from(files("dependencies.json", "THIRD_PARTY_NOTICES.md")) { into("META-INF") }
@@ -218,6 +240,12 @@ tasks.prepareSandbox {
             if (!file.exists()) throw RuntimeException("File $file does not exist")
         }
     }
+}
+
+// MushNative resolves the library next to the plugin's jars. runIde installs into its own sandbox through a
+// separate task, so every sandbox task has to carry it, not just the default one.
+tasks.withType<PrepareSandboxTask>().configureEach {
+    if (isMac) from(compileMacNative) { into("${rootProject.name}/native") }
 }
 
 tasks.publishPlugin {

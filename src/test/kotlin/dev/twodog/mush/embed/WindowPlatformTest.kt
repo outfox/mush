@@ -20,8 +20,14 @@ class WindowPlatformTest {
         assertEquals(WindowPlatform.UNSUPPORTED, WindowPlatform.detect("Linux", "sun.awt.wl.WLToolkit"))
     }
 
+    @Test fun `macOS hosts a published layer and needs no display driver override`() {
+        val platform = WindowPlatform.detect("Mac OS X", "sun.lwawt.macosx.LWCToolkit")
+        assertEquals(WindowPlatform.MACOS, platform)
+        assertTrue(platform.hostArguments.isEmpty())
+    }
+
     @Test fun `unsupported and headless toolkits cannot launch an embedded host`() {
-        assertEquals(WindowPlatform.UNSUPPORTED, WindowPlatform.detect("Mac OS X", "sun.lwawt.macosx.LWCToolkit"))
         assertEquals(WindowPlatform.UNSUPPORTED, WindowPlatform.detect("Linux", "sun.awt.HeadlessToolkit"))
+        assertEquals(WindowPlatform.UNSUPPORTED, WindowPlatform.detect("Mac OS X", "sun.awt.HeadlessToolkit"))
     }
 }

@@ -40,7 +40,10 @@ import javax.swing.Timer
  */
 class SceneViewportEditor(private val file: VirtualFile, private val document: Document) : UserDataHolderBase(), FileEditor {
     private val resPath = GodotProject.resPath(file)!!
-    private val embedding = ChildWindowEmbedding(detachInput = System.getenv("MUSH_DETACH") == "1")
+    private val embedding = ChildWindowEmbedding(
+        detachInput = System.getenv("MUSH_DETACH") == "1",
+        resizeHost = ::sendHostSize,
+    )
     private val host = SpikeHost(::onReply, ::onHostStateChanged)
     @Volatile private var disposed = false
     private val reloadAlarm = Alarm(Alarm.ThreadToUse.POOLED_THREAD, this)
@@ -146,6 +149,10 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
             embedding.sync(host.hwnd, canvas)
     }
 
+    /** The channel a backend uses when it cannot resize the child window itself; see [ChildWindowEmbedding]. */
+    private fun sendHostSize(size: Dimension): Boolean =
+        host.state == SpikeHost.State.RUNNING && host.send("resolution ${size.width}x${size.height}")
+
     private fun stepOut() {
         val layeredPane = SwingUtilities.getRootPane(placeholder)?.layeredPane ?: return
         LOG.info("$resPath: step out")
@@ -232,6 +239,8 @@ class SceneViewportEditor(private val file: VirtualFile, private val document: D
             if (disposed || host.state != SpikeHost.State.RUNNING) return@invokeLater
             when {
                 reply.startsWith("view ") -> ViewState.parse(reply)?.let(viewControls::initialize)
+                // What the host actually published, which decides whether the viewport can show anything at all.
+                reply.startsWith("layer ") -> LOG.info("$resPath: published ${reply.removePrefix("layer ")}")
                 reply.startsWith("hwnd ") -> {
                     embedHost()
                     // Capture and encode the initial snapshot on the same pool as debounced updates.

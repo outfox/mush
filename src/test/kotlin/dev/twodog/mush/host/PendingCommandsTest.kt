@@ -28,6 +28,16 @@ class PendingCommandsTest {
         assertEquals("text newest", queue.poll())
     }
 
+    @Test fun `a drag-resize leaves only the size the host still has to reach`() {
+        val queue = PendingCommands()
+        assertTrue(queue.offer("load scene"))
+        repeat(10_000) { assertTrue(queue.offer("resolution ${800 + it}x600")) }
+        assertEquals(2, queue.size)
+        assertEquals("load scene", queue.poll())
+        assertEquals("resolution 10799x600", queue.poll())
+        assertNull(queue.poll())
+    }
+
     @Test fun `view changes stay bounded alongside document state and earlier controls`() {
         val queue = PendingCommands(3)
         assertTrue(queue.offer("view 1 1 2d"))
