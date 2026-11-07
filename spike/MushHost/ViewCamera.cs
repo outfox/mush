@@ -3,12 +3,15 @@ using Godot;
 namespace Mush.Spike;
 
 /// <summary>
-/// Independent editor views: middle-drag pans 2D/UI or orbits 3D (Shift pans), wheel zooms the selected view.
+/// Independent editor views: middle- or right-drag pans 2D/UI or orbits 3D (Shift pans), wheel zooms the selected view.
 /// Input arrives natively in the Godot window; the root's WindowInput signal sees it before the scene does.
 /// The cameras live under the root, outside the scene, so the view carries over when edits reload the scene.
 /// </summary>
 internal sealed class ViewCamera
 {
+    /// <summary>Editor overlays stay visible when the scene's 2D/UI is hidden.</summary>
+    public const uint OverlayLayer = 1u << 19;
+
     private const float ZoomStep = 1.1f;
 
     private readonly Window _root;
@@ -17,6 +20,7 @@ internal sealed class ViewCamera
     private bool _dragging;
     private string? _scenePath;
     private bool _modeSelected;
+    private Vector3? _home3D;
     private Vector2 _offset2D;
     private float _zoom2D = 1f;
 
@@ -52,20 +56,14 @@ internal sealed class ViewCamera
         if (!_modeSelected)
             Settings = Settings with { Mode = is3D ? ViewMode.ThreeD : ViewMode.TwoD };
 
-        var scenePosition = _root.GetCamera3D()?.GlobalPosition;
+        _home3D = _root.GetCamera3D()?.GlobalPosition;
         _camera2D?.Free();
         _camera3D?.Free();
 
-        _target = Vector3.Zero;
-        _distance = 10f;
-        _yaw = 0f;
-        _pitch = 0.4f;
-        if (scenePosition is { } position)
-            OrbitFrom(position);
-        _camera3D = new Camera3D { Name = "MushCamera3D" };
+        // Editor cameras keep working while the scene's tree is paused.
+        _camera3D = new Camera3D { Name = "MushCamera3D", ProcessMode = Node.ProcessModeEnum.Always };
         _root.AddChild(_camera3D);
         _camera3D.MakeCurrent();
-        Apply3D();
 
         // Preserve the old 2D framing; a 3D scene's UI starts at its ordinary screen coordinates.
         var gameSize = new Vector2(
@@ -74,14 +72,29 @@ internal sealed class ViewCamera
         _camera2D = new Camera2D
         {
             Name = "MushCamera2D",
+            ProcessMode = Node.ProcessModeEnum.Always,
             AnchorMode = is3D ? Camera2D.AnchorModeEnum.FixedTopLeft : Camera2D.AnchorModeEnum.DragCenter,
             Position = is3D ? Vector2.Zero : gameSize / 2
         };
         _root.AddChild(_camera2D);
         _camera2D.MakeCurrent();
+        ResetView();
+    }
+
+    /// <summary>Returns both views to where they started for this scene.</summary>
+    public void ResetView()
+    {
+        _target = Vector3.Zero;
+        _distance = 10f;
+        _yaw = 0f;
+        _pitch = 0.4f;
+        if (_home3D is { } position)
+            OrbitFrom(position);
         _offset2D = Vector2.Zero;
         _zoom2D = 1f;
         _dragging = false;
+        if (_camera3D != null)
+            Apply3D();
         ApplyView();
     }
 
@@ -96,7 +109,7 @@ internal sealed class ViewCamera
     private void ApplyView()
     {
         // Controls and Node2D share the canvas renderer. A global transform also moves CanvasLayer-based UI.
-        _root.CanvasCullMask = Settings.Show2D ? uint.MaxValue : 0;
+        _root.CanvasCullMask = Settings.Show2D ? uint.MaxValue : OverlayLayer;
         _root.Disable3D = !Settings.Show3D;
         _root.GlobalCanvasTransform = new Transform2D(0, Vector2.One * _zoom2D, 0, _offset2D);
     }
@@ -108,7 +121,8 @@ internal sealed class ViewCamera
     {
         switch (e)
         {
-            case InputEventMouseButton { ButtonIndex: MouseButton.Middle } button:
+            // Right-drag serves trackpads. Not Alt+left: Godot only sees Alt when its window already has keyboard focus.
+            case InputEventMouseButton { ButtonIndex: MouseButton.Middle or MouseButton.Right } button:
                 _dragging = button.Pressed;
                 break;
             case InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.WheelUp } wheel:

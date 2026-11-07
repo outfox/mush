@@ -12,7 +12,8 @@ internal sealed class SceneLoader(SceneTree tree)
 
     public readonly record struct Timing(double ParseMs, double InstantiateMs);
 
-    public Node? Current { get; private set; } = tree.CurrentScene;
+    // Never cached: scripts can free the scene or change it behind the loader's back.
+    public Node? Current => tree.CurrentScene;
 
     public Timing Load(string resPath, string? text)
     {
@@ -36,14 +37,22 @@ internal sealed class SceneLoader(SceneTree tree)
     private static PackedScene LoadText(string resPath, string text)
     {
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(resPath)))[..16];
-        var tempPath = $"{TempDir}/{hash}.tscn";
+        // One file per host: split editors run a host each and push the same edit at the same moment.
+        var tempPath = $"{TempDir}/{hash}-{System.Environment.ProcessId}.tscn";
+        var globalPath = ProjectSettings.GlobalizePath(tempPath);
         Directory.CreateDirectory(ProjectSettings.GlobalizePath(TempDir));
-        File.WriteAllText(ProjectSettings.GlobalizePath(tempPath), text);
-
-        var scene = ResourceLoader.Load<PackedScene>(tempPath, cacheMode: ResourceLoader.CacheMode.Ignore)
-                    ?? throw new InvalidOperationException($"cannot parse unsaved text of {resPath}");
-        scene.SetPathCache(resPath);
-        return scene;
+        File.WriteAllText(globalPath, text);
+        try
+        {
+            var scene = ResourceLoader.Load<PackedScene>(tempPath, cacheMode: ResourceLoader.CacheMode.Ignore)
+                        ?? throw new InvalidOperationException($"cannot parse unsaved text of {resPath}");
+            scene.SetPathCache(resPath);
+            return scene;
+        }
+        finally
+        {
+            File.Delete(globalPath);
+        }
     }
 
     // The previous scene stays alive until the new one is instantiated, so shared resources stay cached.
@@ -58,6 +67,5 @@ internal sealed class SceneLoader(SceneTree tree)
 
         root.AddChild(instance);
         tree.CurrentScene = instance;
-        Current = instance;
     }
 }

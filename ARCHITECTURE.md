@@ -3,7 +3,8 @@
 mush is a Rider plugin for Godot scene editing and C# script debugging, backed by 2dog (libgodot hosted by .NET).
 This draft is based on research into 2dog at `b03e7d12` (2026-10-14), the ReSharper/Rider SDK and Godot's
 game-in-editor embedding. The ownership and execution contract below records the decisions agreed on 2026-10-15.
-It defines the implementation target; the current spike still starts an engine per editor and runs scene scripts.
+It defines the implementation target; the current spike still starts an engine per editor and runs scene scripts,
+with the scene tree paused as a stopgap (see [the spike's editing loop](#spike-editing-loop)).
 Open decisions elsewhere are marked **[decide]**.
 
 ## Ownership and execution contract
@@ -316,8 +317,10 @@ step. The proposed changes and reproducible commands are in [the native spike no
 - **v1, pure C#.** Each scratch has its own current editor `Camera2D`/`Camera3D`, outside its replaceable scene
   subtree. Independent **Show 2D (UI)** and **Show 3D** toggles filter rendering; the **Move 2D (UI) / 3D** radio
   selector chooses which view receives navigation. Controls and Node2D share the canvas renderer, so v1 groups
-  them. The global canvas transform moves CanvasLayer UI too. Middle-drag pans 2D/UI or orbits 3D; Shift+middle-drag
-  pans 3D, and the wheel zooms the selected view. Both views and visibility survive document reloads.
+  them. The global canvas transform moves CanvasLayer UI too. Middle- or right-drag pans 2D/UI or orbits 3D (right
+  because trackpads have no middle button; not Alt+left, because Godot only sees Alt when its window already has
+  keyboard focus); Shift+drag pans 3D, the wheel zooms the selected view, and Reset View returns both to where they
+  started. Both views and visibility survive document reloads.
   Rendering filters apply to the scratch viewport; nested viewports keep their own cameras and render settings.
   Visibility and navigation use compact icon actions beside Rider's pane-mode actions. They accept choices as soon
   as a scene editor opens, retaining only the latest preferences until the host reports its initial view state.
@@ -328,10 +331,12 @@ step. The proposed changes and reproducible commands are in [the native spike no
   deferred to editor-only rendering support, including mixed hierarchies, clipping, CanvasGroups and internal draw
   items. Sharing a canvas renderer does not preclude such support; rewriting scene objects is not an acceptable
   workaround.
-- `dotnet run --project spike/harness/ViewProbe` validates mixed 2D/UI/3D pixels in a hidden native window,
-  independent navigation, cursor anchoring, unchanged packed scene state and camera restoration after reload. `runIde` builds the spike host
-  before launching Rider so its command support matches the toolbar. `gradlew check` also runs a headless
-  real-host protocol check; a scene load without a view-state handshake fails the check and is reported in the IDE.
+- `dotnet run --project spike/harness/ViewProbe` validates mixed 2D/UI/3D pixels in a hidden native window, in a
+  paused tree: independent navigation, cursor anchoring, selection outlines and picking, unchanged packed scene state
+  and camera restoration after reload. `runIde` builds the spike host before launching Rider so its command support
+  matches the toolbar. `gradlew check` also runs a headless real-host protocol check; a scene load without a view-state
+  handshake fails the check and is reported in the IDE. It also feeds the host what typing can produce: broken and empty
+  documents, paths with spaces, scenes that free or replace themselves, and two hosts editing one scene at once.
 - **Later: Godot's built-in runtime select.** It offers 2D pan/zoom, 3D freelook and click/box select with outline
   drawing (`runtime_node_select.cpp`).
   - It needs an active debugger peer (`scene_debugger.cpp:95`), and the override APIs are unbound and debug-only.
@@ -572,13 +577,51 @@ The host also coalesces its incoming state and limits command work between engin
   measured close was about 3 ms; the child exited and the Canvas was released without watchdog intervention.
 - A headless real-host check submitted 1,000 snapshots during an engine-thread stall: one reload applied the final
   snapshot, and graceful quit completed.
-- The full Rider debugger gate remains open: attachment and unexpected Canvas peer recreation still contain
-  synchronous native reparenting. The suspension probe validates retirement, not every tab/move/focus path.
+- The full Rider debugger gate remains open. Native calls that wait for the host's message pump (style changes,
+  reparenting, synchronous resizes) now run on a dedicated thread, and the suspension probe checks the EDT is not held
+  behind them.
+- A hung host can still freeze all of Rider. In a sandbox test (2026-11-07) a host was suspended and a tab switched:
+  parking timed out, then the EDT stuck in a synchronous toolkit call during tab removal
+  (`WInputMethod.endCompositionNative`) for 8 minutes, ending the instant the host died. The exact cause is unproved. A
+  standalone probe that destroys a suspended host's Canvas did not freeze, with or without a visible child, which leaves
+  focus and input-method state on the input queue a cross-process child shares with its parent as the leading suspect.
+- So recovery does not depend on the path: an off-EDT watch ends the host when the UI and the host have both been silent
+  for 5 s, and a host that cannot be parked within 2 s is ended first, since it loses its window with the Canvas. Restart
+  Viewport brings a new one. Neither has been retried in Rider since that freeze; it needs about 5 GB of free memory.
+- Still unproved: a real debugger breakpoint, and hardware mouse and keyboard input while a host is hung, since only
+  window-targeted synthetic input has been tried. `MUSH_DETACH=1` remains the candidate for removing the cause.
 - Rider sandbox QA (2026-10-15): text-only, split and viewport-only buttons worked on the restored scene tab;
   the detached editor also switched layouts and rendered. The reported intermittent first-tab failure remains
   unresolved. A control run with mush absent, empty plugin paths and no `MushHost` reproduced the shutdown
   `HighlightingPanel`/`ROOT_DISPOSABLE` leak and detached text editor's `LineStatusTrackerManager` warning.
   These diagnostics occur independently of mush. The separate shutdown self-wait exception was not reproduced.
+
+### Spike editing loop
+
+How the spike behaves today, until the scratch and Frozen milestones replace it (2026-11-07):
+
+- **Boot.** The plugin starts a host with `--path <project root>`, so scenes always resolve in their own project, and
+  `--scene res://.godot/mush/blank.tscn`, so the game's main scene never runs. Booting the opened scene instead would
+  kill the host when that file is broken. The first scene comes from the document, after the window is embedded.
+  Autoloads still run; stopping them needs the `.editor` execution hooks.
+- **Trust.** No host starts in an untrusted project, because loading a scene can run its code.
+- **Stopgap for Frozen.** The tree is paused, which stops motion, physics and scene input. Constructors and `_Ready`
+  still run on every reload, so this does not satisfy the contract above and must not be mistaken for it.
+- **Reloads.** `text <base64> <path>`; the path comes last because it can contain spaces. Each host has its own temp
+  file, deleted after loading, because split editors push the same edit at the same moment. Saving another `.tscn`,
+  `.tres` or `.gdshader` in the project reloads open scenes, since they only reread those on reload.
+- **Problems.** The host marks where each load starts, and the plugin counts Godot's `ERROR:` lines until it ends;
+  errors at other times are about the engine, not this scene, and only reach the log. The status line shows the first
+  one, and a parse error marks its line in the text.
+- **Text and picture.** The `[node]` section under the text cursor is outlined in the viewport; a click in the viewport
+  moves the cursor to that node's section, or its nearest ancestor with one. Clicks test bounds and reverse tree order.
+- **Recovery.** A once-a-second ping reports a stuck host after 3 s, and ends it if the UI is stuck too. Restart Viewport
+  replaces the host at any time and keeps the document and view choices. It does not rebuild the host; C# changes still
+  need a build first.
+- **Hidden tabs.** A hidden viewport drops to 5 fps: 187 to 4.7 fps and 38% to 4% of a core, measured on a 1280x720
+  scene. This is process-wide, which only works while each editor has its own host.
+- **Diagnostics.** `MUSH_DEBUG=1` restores the once-a-second `stats` poll in the status line and log. It is off by
+  default because it reads a whole frame back from the GPU.
 
 ## Milestones
 

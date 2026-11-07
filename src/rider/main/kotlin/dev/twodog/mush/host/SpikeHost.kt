@@ -9,6 +9,13 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
+ * Whether a hung host is the likely reason the UI thread is stuck. Both must have gone quiet: the UI alone stalls during
+ * ordinary IDE work, and a host alone stalls at a breakpoint or in a slow load, and neither of those should end a host.
+ */
+internal fun isHostFreezingUi(now: Long, uiSeenAt: Long, hostSeenAt: Long, limit: Long): Boolean =
+    now - uiSeenAt > limit && now - hostSeenAt > limit
+
+/**
  * The spike host process (`spike/MushHost`): line commands on stdin, `mush:`-prefixed replies on stdout.
  * Stands in for the planned pipe protocol until the real host exists.
  */
@@ -26,6 +33,9 @@ class SpikeHost(
         private set
     /** Completes after exit, or after a cancelled startup that has not published any window. */
     val termination = CompletableFuture<Unit>()
+    /** When the host last wrote anything; a silent host is either idle with nothing to say or hung, so ping it to tell. */
+    @Volatile var lastOutputAt = System.nanoTime()
+        private set
 
     private val gate = ReentrantLock()
     private val changed = gate.newCondition()
@@ -54,8 +64,9 @@ class SpikeHost(
     }
 
     /** The shutdown deadline is independent of the writer, even when its pipe is full. */
-    fun stop() {
-        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(shutdownTimeoutMs)
+    @JvmOverloads
+    fun stop(timeoutMs: Long = shutdownTimeoutMs) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
         val stopping = gate.withLock {
             when (state) {
                 State.NEW -> state = State.STOPPED
@@ -135,9 +146,11 @@ class SpikeHost(
         try {
             started.inputStream.bufferedReader(StandardCharsets.UTF_8).useLines { lines ->
                 for (line in lines) {
+                    lastOutputAt = System.nanoTime()
                     if (state != State.RUNNING) continue
                     if (!line.startsWith("mush:")) {
                         if (line.contains("ERROR")) LOG.warn("host: $line")
+                        GODOT_ERROR.matchEntire(line)?.let { deliver("problem ${it.groupValues[1]}") }
                         continue
                     }
                     val reply = line.removePrefix("mush:")
@@ -149,18 +162,21 @@ class SpikeHost(
                         }
                         gate.withLock { if (state == State.RUNNING) hwnd = handle }
                     }
-                    if (state == State.RUNNING) {
-                        try {
-                            onReply(reply)
-                        } catch (e: Exception) {
-                            LOG.warn("host reply handler failed", e)
-                        }
-                    }
+                    deliver(reply)
                 }
             }
             if (state == State.RUNNING && started.isAlive) fail("Host output closed before exit")
         } catch (e: IOException) {
             fail("Host output closed: ${e.message}")
+        }
+    }
+
+    private fun deliver(reply: String) {
+        if (state != State.RUNNING) return
+        try {
+            onReply(reply)
+        } catch (e: Exception) {
+            LOG.warn("host reply handler failed", e)
         }
     }
 
@@ -223,6 +239,7 @@ class SpikeHost(
 
     private companion object {
         val LOG = logger<SpikeHost>()
+        val GODOT_ERROR = Regex("""(?:USER |SCRIPT |SHADER )?ERROR: (.+)""")
         fun background(name: String, action: () -> Unit) = Thread(action, name).apply { isDaemon = true }.start()
     }
 }

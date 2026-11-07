@@ -35,13 +35,11 @@ internal sealed class PendingCommands(int capacity = 32)
         }
     }
 
-    private static string? StateKey(string command) => command switch
+    private static string? StateKey(string command)
     {
-        "stats" => "stats",
-        _ when command.StartsWith("text ", StringComparison.Ordinal) => "text",
-        _ when command.StartsWith("view ", StringComparison.Ordinal) => "view",
-        _ => null
-    };
+        var verb = command.Split(' ', 2)[0];
+        return verb is "text" or "view" or "stats" or "select" or "visible" or "ping" ? verb : null;
+    }
 
     public bool TryDequeue([NotNullWhen(true)] out string? command)
     {

@@ -51,6 +51,21 @@ public sealed class PendingCommandsTests
         Assert.False(commands.Enqueue("quit"));
     }
 
+    [Theory]
+    [InlineData("select a", "select b")]
+    [InlineData("select a", "select")]
+    [InlineData("visible 1", "visible 0")]
+    [InlineData("ping", "ping")]
+    public void EditorStateKeepsOnlyTheLatestValue(string first, string latest)
+    {
+        var commands = new PendingCommands();
+        Assert.True(commands.Enqueue(first));
+        Assert.True(commands.Enqueue(latest));
+        Assert.True(commands.TryDequeue(out var actual));
+        Assert.Equal(latest, actual);
+        Assert.False(commands.TryDequeue(out _));
+    }
+
     [Fact]
     public void ViewChangesCoalesceWithoutDiscardingDocumentOrControls()
     {

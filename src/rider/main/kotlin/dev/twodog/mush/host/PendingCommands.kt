@@ -6,13 +6,8 @@ internal class PendingCommands(private val capacity: Int = 32) {
     val size: Int get() = commands.size
 
     fun offer(command: String): Boolean {
-        val key = when {
-            command.startsWith("text ") -> "text "
-            command.startsWith("view ") -> "view "
-            command == "stats" -> "stats"
-            else -> null
-        }
-        if (key != null) commands.removeAll { if (key == "stats") it == key else it.startsWith(key) }
+        val verb = command.substringBefore(' ')
+        if (verb in LATEST_ONLY) commands.removeAll { it.substringBefore(' ') == verb }
         if (commands.size >= capacity) return false
         commands.addLast(command)
         return true
@@ -20,4 +15,8 @@ internal class PendingCommands(private val capacity: Int = 32) {
 
     fun poll(): String? = commands.removeFirstOrNull()
     fun clear() = commands.clear()
+
+    private companion object {
+        val LATEST_ONLY = setOf("text", "view", "stats", "select", "visible", "ping")
+    }
 }

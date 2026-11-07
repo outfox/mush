@@ -114,6 +114,27 @@ class SpikeHostTest {
         assertFalse(host.isStarted)
     }
 
+    @Test fun `Godot errors reach the editor as problems and other output does not`() {
+        Fixture("godot-output").use { fixture ->
+            val replies = java.util.concurrent.CopyOnWriteArrayList<String>()
+            val done = CountDownLatch(1)
+            fixture.onReply = {
+                replies += it
+                if (it == "reply done") done.countDown()
+            }
+            fixture.start()
+            assertTrue(fixture.host.send("done"))
+            assertTrue(done.await(3, TimeUnit.SECONDS))
+            assertEquals(listOf("problem plain", "problem from a script", "reply done"), replies.filter { it != "hwnd 12345" })
+        }
+    }
+
+    @Test fun `only a stuck UI together with a silent host ends the host`() {
+        assertTrue(isHostFreezingUi(now = 100, uiSeenAt = 10, hostSeenAt = 10, limit = 50))
+        assertFalse("ordinary IDE stall, host fine", isHostFreezingUi(now = 100, uiSeenAt = 10, hostSeenAt = 90, limit = 50))
+        assertFalse("breakpoint or slow load, UI fine", isHostFreezingUi(now = 100, uiSeenAt = 90, hostSeenAt = 10, limit = 50))
+    }
+
     @Test fun `a malformed HWND cannot kill the reader`() {
         Fixture("malformed").use { fixture ->
             fixture.start()

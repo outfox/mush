@@ -1,5 +1,6 @@
 package dev.twodog.mush.scene
 
+import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
@@ -7,17 +8,26 @@ import com.intellij.openapi.actionSystem.Separator
 import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.actionSystem.Toggleable
 import com.intellij.openapi.project.DumbAware
+import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.util.IconLoader
 import javax.swing.Icon
 
 /** Bound to this editor's state, including when it is in a split or detached window. */
-internal fun viewportViewActions(controls: ViewportViewControls): Array<AnAction> = arrayOf(
+internal fun viewportViewActions(controls: ViewportViewControls, resetView: () -> Unit, restart: () -> Unit): Array<AnAction> = arrayOf(
     VisibilityAction(controls, ViewMode.TWO_D, "2D / UI", "show2d"),
     VisibilityAction(controls, ViewMode.THREE_D, "3D", "show3d"),
     Separator.create(),
-    NavigationAction(controls, ViewMode.TWO_D, "2D / UI", "move2d", "Middle-drag to pan; wheel to zoom"),
-    NavigationAction(controls, ViewMode.THREE_D, "3D", "move3d", "Middle-drag to orbit; Shift+middle-drag to pan; wheel to zoom")
+    NavigationAction(controls, ViewMode.TWO_D, "2D / UI", "move2d", "Middle- or right-drag to pan; wheel to zoom"),
+    NavigationAction(controls, ViewMode.THREE_D, "3D", "move3d", "Middle- or right-drag to orbit; Shift+drag to pan; wheel to zoom"),
+    Separator.create(),
+    CommandAction("Reset View", "Return 2D/UI and 3D to where they started", AllIcons.General.Reset, resetView),
+    CommandAction("Restart Viewport", "Start a new viewport host after a crash or hang, or to pick up a rebuilt host", AllIcons.Actions.Restart, restart),
 )
+
+private class CommandAction(text: String, description: String, icon: Icon, private val run: () -> Unit) :
+    DumbAwareAction(text, description, icon) {
+    override fun actionPerformed(e: AnActionEvent) = run()
+}
 
 private abstract class ViewAction(
     protected val controls: ViewportViewControls,

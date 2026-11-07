@@ -32,11 +32,13 @@ internal class X11WindowEmbedding : NativeWindowEmbedding {
         shown = false
     }
 
-    override fun park(child: Long) {
+    // The X server handles this without the host's event loop, so a hung host never gets in the way.
+    override fun park(child: Long): Boolean {
         checked(xcb.xcb_unmap_window_checked(connection, child.toInt()))
         checked(xcb.xcb_reparent_window_checked(connection, child.toInt(), ParkingWindow.id, 0, 0))
         lastSize = null
         shown = false
+        return true
     }
 
     override fun sync(child: Long, parent: Component) {
