@@ -141,6 +141,9 @@ internal class WindowsWindowEmbedding(private val detachInput: Boolean) : Native
 
     override fun clientSize(parent: Component): Rectangle = clientRect(Native.getComponentID(parent))
 
+    override fun isMouseButtonDown(): Boolean =
+        listOf(VK_LBUTTON, VK_RBUTTON, VK_MBUTTON).any { user32.GetAsyncKeyState(it).toInt() and KEY_DOWN != 0 }
+
     override fun close() = foreignCalls.shutdown()
 
     private fun clientRect(hwnd: Long): Rectangle {
@@ -172,6 +175,7 @@ internal class WindowsWindowEmbedding(private val detachInput: Boolean) : Native
         fun GetWindowThreadProcessId(hwnd: Long, processId: Pointer?): Int
         fun AttachThreadInput(from: Int, to: Int, attach: Boolean): Boolean
         fun GetWindowRgn(hwnd: Long, region: Long): Int
+        fun GetAsyncKeyState(key: Int): Short
     }
 
     @Suppress("FunctionName")
@@ -204,5 +208,9 @@ internal class WindowsWindowEmbedding(private val detachInput: Boolean) : Native
         const val SWP_ASYNCWINDOWPOS = 0x4000
         const val SW_HIDE = 0
         const val NULLREGION = 1
+        const val VK_LBUTTON = 0x01
+        const val VK_RBUTTON = 0x02
+        const val VK_MBUTTON = 0x04
+        const val KEY_DOWN = 0x8000
     }
 }

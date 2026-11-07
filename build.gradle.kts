@@ -16,6 +16,9 @@ val hostExecutableName = if (System.getProperty("os.name").startsWith("Windows")
 // The sample is a runIde fixture. Mush's own host can reference any Godot game project; no game-local host is needed.
 val mushGameProject = providers.gradleProperty("MushGameProject")
     .map { file(it) }.getOrElse(file("samples/MushSample/MushSample.csproj"))
+val jnaArch = if (System.getProperty("os.arch") == "aarch64") "aarch64" else "amd64"
+// Task actions cannot reach the build script under the configuration cache; this provider resolves when it is stored.
+val jnaBootLibraryPath = provider { intellijPlatform.platformPath.resolve("lib/jna/$jnaArch").toString() }
 
 allprojects {
     repositories {
@@ -58,35 +61,25 @@ tasks.register<JavaExec>("testLinuxEmbedding") {
     providers.gradleProperty("MushTestHost").orNull?.let { args("--host", it) }
     javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(25)) })
     jvmArgs("--enable-native-access=ALL-UNNAMED")
-    doFirst {
-        val arch = if (System.getProperty("os.arch") == "aarch64") "aarch64" else "amd64"
-        systemProperty("jna.boot.library.path", intellijPlatform.platformPath.resolve("lib/jna/$arch").toString())
-    }
+    val jnaPath = jnaBootLibraryPath
+    jvmArgumentProviders.add(CommandLineArgumentProvider { listOf("-Djna.boot.library.path=${jnaPath.get()}") })
     onlyIf { System.getProperty("os.name") == "Linux" }
 }
 
-val compileLinuxGpuNative = tasks.register("compileLinuxGpuNative") {
+val compileLinuxGpuNative = tasks.register<Exec>("compileLinuxGpuNative") {
     group = "build"
     description = "Build the experimental Linux EGL GPU importer (requires EGL/GLES/Vulkan development headers)."
     onlyIf { System.getProperty("os.name") == "Linux" }
-    doLast {
-        providers.exec {
-            executable("sh")
-            args("spike/native/build.sh", layout.buildDirectory.dir("native").get().asFile.absolutePath)
-            workingDir(rootDir)
-        }.result.get()
-    }
+    executable("sh")
+    args("spike/native/build.sh", layout.buildDirectory.dir("native").get().asFile.absolutePath)
+    workingDir(rootDir)
 }
 
-val compileGpuShareProbe = tasks.register("compileGpuShareProbe") {
+val compileGpuShareProbe = tasks.register<Exec>("compileGpuShareProbe") {
     onlyIf { System.getProperty("os.name") == "Linux" }
-    doLast {
-        providers.exec {
-            executable("dotnet")
-            args("build", "spike/harness/GpuShareProbe", "--nologo", "-v", "minimal")
-            workingDir(rootDir)
-        }.result.get()
-    }
+    executable("dotnet")
+    args("build", "spike/harness/GpuShareProbe", "--nologo", "-v", "minimal")
+    workingDir(rootDir)
 }
 
 tasks.register<JavaExec>("testLinuxGpuSharing") {
@@ -106,67 +99,52 @@ tasks.register<JavaExec>("testLinuxGpuSharing") {
             "--add-opens=java.desktop/sun.awt=ALL-UNNAMED", "--add-opens=java.desktop/sun.awt.wl=ALL-UNNAMED")
     } else javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(25)) })
     jvmArgs("--enable-native-access=ALL-UNNAMED")
-    doFirst {
-        val nativeDir = layout.buildDirectory.dir("native").get().asFile.absolutePath
-        val arch = if (System.getProperty("os.arch") == "aarch64") "aarch64" else "amd64"
-        systemProperty("jna.boot.library.path", intellijPlatform.platformPath.resolve("lib/jna/$arch").toString())
-        systemProperty("jna.library.path", nativeDir)
-        environment("LD_LIBRARY_PATH", nativeDir + ":" + (System.getenv("LD_LIBRARY_PATH") ?: ""))
-    }
+    val jnaPath = jnaBootLibraryPath
+    jvmArgumentProviders.add(CommandLineArgumentProvider { listOf("-Djna.boot.library.path=${jnaPath.get()}") })
+    val nativeDir = layout.buildDirectory.dir("native").get().asFile.absolutePath
+    systemProperty("jna.library.path", nativeDir)
+    environment("LD_LIBRARY_PATH", nativeDir + ":" + (System.getenv("LD_LIBRARY_PATH") ?: ""))
     onlyIf { System.getProperty("os.name") == "Linux" }
 }
 
-val testHostCommands = tasks.register("testHostCommands") {
-    doLast {
-        providers.exec {
-            executable("dotnet")
-            args("test", "tests/MushHost.Tests/MushHost.Tests.csproj", "--nologo", "-v", "minimal")
-            workingDir(rootDir)
-        }.result.get()
-    }
+val testHostCommands = tasks.register<Exec>("testHostCommands") {
+    executable("dotnet")
+    args("test", "tests/MushHost.Tests/MushHost.Tests.csproj", "--nologo", "-v", "minimal")
+    workingDir(rootDir)
 }
 
 tasks.check { dependsOn(testHostCommands) }
 
-val compileDotNet = tasks.register("compileDotNet") {
-    doLast {
-        providers.exec {
-            executable("dotnet")
-            args("build", dotnetSolution, "-c", buildConfiguration, "--nologo", "-v", "q", "/p:HostFullIdentifier=")
-            workingDir(rootDir)
-        }.result.get()
-    }
+val compileDotNet = tasks.register<Exec>("compileDotNet") {
+    executable("dotnet")
+    args("build", dotnetSolution, "-c", buildConfiguration, "--nologo", "-v", "q", "/p:HostFullIdentifier=")
+    workingDir(rootDir)
 }
 
-val compileSpikeHost = tasks.register("compileSpikeHost") {
-    doLast {
-        providers.exec {
-            executable("dotnet")
-            args("build", "spike/MushHost/MushHost.csproj", "-c", "Debug", "--nologo", "-v", "minimal",
-                "/p:MushGameProject=${mushGameProject.absolutePath}")
-            workingDir(rootDir)
-        }.result.get()
-    }
+val compileSpikeHost = tasks.register<Exec>("compileSpikeHost") {
+    executable("dotnet")
+    args("build", "spike/MushHost/MushHost.csproj", "-c", "Debug", "--nologo", "-v", "minimal",
+        "/p:MushGameProject=${mushGameProject.absolutePath}")
+    workingDir(rootDir)
 }
 
-val testHostViewProtocol = tasks.register("testHostViewProtocol") {
-    doLast {
-        // Use a separate output directory so checks can run while Rider has the development host open.
-        val hostOutput = layout.buildDirectory.dir("host-view-test").get().asFile
-        providers.exec {
-            executable("dotnet")
-            // 2dog's native/tool copy targets concatenate OutputPath and filenames, so keep its trailing separator.
-            args("build", "spike/MushHost/MushHost.csproj", "-c", "Debug", "-o", hostOutput.absolutePath + "/",
-                "--nologo", "-v", "minimal")
-            workingDir(rootDir)
-        }.result.get()
-        providers.exec {
-            executable("dotnet")
-            args("run", "--project", "spike/harness/ViewProbe", "--no-launch-profile", "--", "--host",
-                hostOutput.resolve(hostExecutableName).absolutePath)
-            workingDir(rootDir)
-        }.result.get()
-    }
+// Use a separate output directory so checks can run while Rider has the development host open.
+val hostViewTestOutput = layout.buildDirectory.dir("host-view-test").get().asFile
+
+val compileHostViewTestHost = tasks.register<Exec>("compileHostViewTestHost") {
+    executable("dotnet")
+    // 2dog's native/tool copy targets concatenate OutputPath and filenames, so keep its trailing separator.
+    args("build", "spike/MushHost/MushHost.csproj", "-c", "Debug", "-o", hostViewTestOutput.absolutePath + "/",
+        "--nologo", "-v", "minimal")
+    workingDir(rootDir)
+}
+
+val testHostViewProtocol = tasks.register<Exec>("testHostViewProtocol") {
+    dependsOn(compileHostViewTestHost)
+    executable("dotnet")
+    args("run", "--project", "spike/harness/ViewProbe", "--no-launch-profile", "--", "--host",
+        hostViewTestOutput.resolve(hostExecutableName).absolutePath)
+    workingDir(rootDir)
 }
 
 tasks.check { dependsOn(testHostViewProtocol) }
@@ -206,16 +184,16 @@ tasks.prepareSandbox {
     val dllFiles = listOf(
         "$outputFolder/${dotnetPluginId}.dll",
         "$outputFolder/${dotnetPluginId}.pdb",
-    )
+    ).map(::file)
+    val pluginDotnetDir = "${rootProject.name}/dotnet"
 
     dllFiles.forEach { f ->
-        from(file(f)) { into("${rootProject.name}/dotnet") }
+        from(f) { into(pluginDotnetDir) }
     }
 
     doLast {
         dllFiles.forEach { f ->
-            val file = file(f)
-            if (!file.exists()) throw RuntimeException("File $file does not exist")
+            if (!f.exists()) throw RuntimeException("File $f does not exist")
         }
     }
 }

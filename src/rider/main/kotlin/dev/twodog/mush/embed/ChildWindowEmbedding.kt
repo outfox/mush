@@ -32,6 +32,7 @@ class ChildWindowEmbedding(detachInput: Boolean) {
     fun describe(child: Long, parent: Component): String = native.value.describe(child, parent)
     fun isCutAway(component: Component): Boolean = platform == WindowPlatform.WINDOWS && native.value.isCutAway(component)
     fun clientSize(parent: Component): Rectangle = native.value.clientSize(parent)
+    fun isMouseButtonDown(): Boolean = platform == WindowPlatform.WINDOWS && native.value.isMouseButtonDown()
 
     /** Retain the Canvas peer until the foreign process exits, including while it is debugger-suspended. */
     fun retireCanvas(canvas: Component, termination: CompletableFuture<*>): CompletableFuture<Unit> {
@@ -64,6 +65,7 @@ internal interface NativeWindowEmbedding : AutoCloseable {
     fun describe(child: Long, parent: Component): String
     fun isCutAway(component: Component): Boolean = false
     fun clientSize(parent: Component): Rectangle
+    fun isMouseButtonDown(): Boolean = false
     override fun close() {}
 }
 
