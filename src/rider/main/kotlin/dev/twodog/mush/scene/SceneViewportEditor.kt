@@ -235,7 +235,8 @@ class SceneViewportEditor(
     private fun relocateIfMisplaced() {
         if (!canvas.isShowing || System.nanoTime() - relocateFailedAt < REMIX_BACKOFF_NS)
             return
-        // Moving the Canvas inside the window's modal move loop ends the drag; place it once the button is released.
+        // Moving the Canvas inside Windows' modal move loop ends the drag; place it once the button is released.
+        // X11 window managers move the window outside Rider's event loop, so there is nothing to wait for there.
         if (embedding.isMouseButtonDown())
             return
         val expected = placeholder.locationOnScreen.apply { translate(canvas.x, canvas.y) }
