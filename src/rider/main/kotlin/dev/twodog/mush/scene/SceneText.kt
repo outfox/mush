@@ -12,7 +12,7 @@ internal object SceneText {
     /** The node path, relative to the scene root, of the `[node]` section holding [line]; null in any other section. */
     fun nodePathAt(text: CharSequence, line: Int): String? {
         val header = sectionHeaders(text).takeWhile { it.index <= line }.lastOrNull()?.value ?: return null
-        return if (header.startsWith("[node ")) nodePath(header) else null
+        return if (isNode(header)) nodePath(header) else null
     }
 
     /**
@@ -22,13 +22,16 @@ internal object SceneText {
     fun lineOfNode(text: CharSequence, path: String): Int? {
         val lines = HashMap<String, Int>()
         for ((index, header) in sectionHeaders(text)) {
-            if (header.startsWith("[node ")) nodePath(header)?.let { lines.putIfAbsent(it, index) }
+            if (isNode(header)) nodePath(header)?.let { lines.putIfAbsent(it, index) }
         }
         return generateSequence(path) { if ('/' in it) it.substringBeforeLast('/') else null }
             .firstNotNullOfOrNull(lines::get) ?: lines["."]
     }
 
+    private fun isNode(header: String) = SECTION.find(header)?.groupValues?.get(1) == "node"
+
     // A string value can run over lines and hold anything, including a line that looks just like a section.
+    // Outside a string, `;` comments out the rest of the line, quotes included.
     private fun sectionHeaders(text: CharSequence): Sequence<IndexedValue<String>> = sequence {
         var inString = false
         for ((index, line) in text.lineSequence().withIndex()) {
@@ -38,6 +41,7 @@ internal object SceneText {
                 when (line[i]) {
                     '\\' -> i++
                     '"' -> inString = !inString
+                    ';' -> if (!inString) break
                 }
                 i++
             }

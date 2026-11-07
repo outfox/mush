@@ -580,7 +580,8 @@ The host also coalesces its incoming state and limits command work between engin
 - The full Rider debugger gate remains open. Native calls that wait for the host's message pump (style changes,
   reparenting, synchronous resizes) now run on a dedicated thread. The EDT still waits for two of them, within limits: up
   to 50 ms for a resize before showing and up to 2 s for parking, which must finish before AWT destroys the old parent.
-  The UI stalls for that long when a host is hung. The suspension probe checks that these limits hold.
+  The UI stalls for that long when a host is hung. The suspension probe checks that the EDT gets through these
+  calls within 3 s and that parking reports the failure.
 - A hung host can still freeze all of Rider. In a sandbox test (2026-11-07) a host was suspended and a tab switched:
   parking timed out, then the EDT stuck in a synchronous toolkit call during tab removal
   (`WInputMethod.endCompositionNative`) for 8 minutes, ending the instant the host died. The exact cause is unproved. A

@@ -68,6 +68,7 @@ public sealed class PendingCommandsTests
 
     [Theory]
     [InlineData("text good res://scene.tscn", "text")]
+    [InlineData("text good res://scene.tscn", "text  ")]
     [InlineData("view 1 1 2d", "view")]
     [InlineData("visible 1", "visible")]
     public void MalformedCommandsCannotEvictAPendingUpdate(string valid, string malformed)

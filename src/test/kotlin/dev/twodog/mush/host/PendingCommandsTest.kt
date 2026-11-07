@@ -39,7 +39,7 @@ class PendingCommandsTest {
     }
 
     @Test fun `malformed commands cannot evict a pending update`() {
-        for ((valid, malformed) in listOf("text good res://scene.tscn" to "text", "view 1 1 2d" to "view", "visible 1" to "visible")) {
+        for ((valid, malformed) in listOf("text good res://scene.tscn" to "text", "text good res://scene.tscn" to "text  ", "view 1 1 2d" to "view", "visible 1" to "visible")) {
             val queue = PendingCommands()
             assertTrue(queue.offer(valid))
             assertTrue(queue.offer(malformed))

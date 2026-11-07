@@ -22,7 +22,7 @@ internal class PendingCommands(private val capacity: Int = 32) {
         // Without a payload those are malformed, and must not evict a valid pending update.
         fun stateKey(command: String): String? {
             val verb = command.substringBefore(' ')
-            return verb.takeIf { it in STANDALONE || (it in NEEDS_PAYLOAD && ' ' in command) }
+            return verb.takeIf { it in STANDALONE || (it in NEEDS_PAYLOAD && command.substringAfter(' ', "").isNotBlank()) }
         }
     }
 }

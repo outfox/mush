@@ -70,6 +70,14 @@ class SceneTextTest {
         assertNull(SceneText.nodePathAt(scene, lineOf("extra = 1")))
     }
 
+    @Test fun `comments and tab separated headers do not break linking`() {
+        val text = "[gd_scene format=3]\n\n[node\tname=\"Root\" type=\"Node\"]\n; a stray \" in a comment\n\n" +
+            "[node name=\"Child\" type=\"Node\" parent=\".\"]\n"
+        assertEquals(".", SceneText.nodePathAt(text, 2))
+        assertEquals("Child", SceneText.nodePathAt(text, 5))
+        assertEquals(5, SceneText.lineOfNode(text, "Child"))
+    }
+
     @Test fun `a clicked node finds its section`() {
         assertEquals(lineOf("[node name=\"Root\""), SceneText.lineOfNode(scene, "."))
         assertEquals(lineOf("[node name=\"Label\""), SceneText.lineOfNode(scene, "UI/Label"))

@@ -42,7 +42,7 @@ internal sealed class PendingCommands(int capacity = 32)
         {
             "stats" or "select" or "ping" => parts[0],
             // Without a payload these are malformed, and must not evict a valid pending update.
-            "text" or "view" or "visible" when parts.Length == 2 => parts[0],
+            "text" or "view" or "visible" when parts.Length == 2 && !string.IsNullOrWhiteSpace(parts[1]) => parts[0],
             _ => null
         };
     }
