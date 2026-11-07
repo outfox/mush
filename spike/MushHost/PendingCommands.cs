@@ -35,13 +35,17 @@ internal sealed class PendingCommands(int capacity = 32)
         }
     }
 
-    private static string? StateKey(string command) => command switch
+    private static string? StateKey(string command)
     {
-        "stats" => "stats",
-        _ when command.StartsWith("text ", StringComparison.Ordinal) => "text",
-        _ when command.StartsWith("view ", StringComparison.Ordinal) => "view",
-        _ => null
-    };
+        var parts = command.Split(' ', 2);
+        return parts[0] switch
+        {
+            "stats" or "select" or "ping" => parts[0],
+            // Without a payload these are malformed, and must not evict a valid pending update.
+            "text" or "view" or "visible" when parts.Length == 2 && !string.IsNullOrWhiteSpace(parts[1]) => parts[0],
+            _ => null
+        };
+    }
 
     public bool TryDequeue([NotNullWhen(true)] out string? command)
     {

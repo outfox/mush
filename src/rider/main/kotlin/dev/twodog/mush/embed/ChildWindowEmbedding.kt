@@ -25,7 +25,8 @@ class ChildWindowEmbedding(detachInput: Boolean) {
     val hostArguments: List<String> get() = platform.hostArguments
 
     fun embed(child: Long, parent: Component) = native.value.embed(child, parent)
-    fun park(child: Long) = native.value.park(child)
+    /** False when the child stays behind, such as under a hung host, and so goes with its parent. */
+    fun park(child: Long): Boolean = native.value.park(child)
     fun sync(child: Long, parent: Component) = native.value.sync(child, parent)
     fun resizeBeforeShow(child: Long, parent: Component, timeoutMs: Long) = native.value.resizeBeforeShow(child, parent, timeoutMs)
     fun describe(child: Long, parent: Component): String = native.value.describe(child, parent)
@@ -57,7 +58,7 @@ class ChildWindowEmbedding(detachInput: Boolean) {
 
 internal interface NativeWindowEmbedding : AutoCloseable {
     fun embed(child: Long, parent: Component)
-    fun park(child: Long)
+    fun park(child: Long): Boolean
     fun sync(child: Long, parent: Component)
     fun resizeBeforeShow(child: Long, parent: Component, timeoutMs: Long)
     fun describe(child: Long, parent: Component): String

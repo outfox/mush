@@ -8,6 +8,13 @@ import java.nio.charset.StandardCharsets;
 public final class HostProcessFixture {
     public static void main(String[] args) throws Exception {
         if (args[0].equals("malformed")) System.out.println("mush:hwnd invalid");
+        if (args[0].equals("godot-output")) {
+            System.out.println("ERROR: plain");
+            System.out.println("   at: ResourceLoader::_load (.\\core/io/resource_loader.cpp:325)");
+            System.out.println("WARNING: not a problem");
+            System.out.println("SCRIPT ERROR: from a script");
+            System.out.println("a line that mentions ERROR: in passing");
+        }
         System.out.println("mush:hwnd 12345");
         System.out.flush();
         if (args[0].equals("closed-output")) {

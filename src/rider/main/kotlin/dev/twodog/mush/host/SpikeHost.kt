@@ -26,6 +26,9 @@ class SpikeHost(
         private set
     /** Completes after exit, or after a cancelled startup that has not published any window. */
     val termination = CompletableFuture<Unit>()
+    /** When the host last wrote anything; a silent host is either idle with nothing to say or hung, so ping it to tell. */
+    @Volatile var lastOutputAt = System.nanoTime()
+        private set
 
     private val gate = ReentrantLock()
     private val changed = gate.newCondition()
@@ -33,6 +36,7 @@ class SpikeHost(
     private var process: Process? = null
 
     val isStarted: Boolean get() = state == State.STARTING || state == State.RUNNING
+    @get:JvmName("pendingCommandCount")
     internal val pendingCommandCount: Int get() = gate.withLock { pending.size }
 
     /** One launcher per process lifetime. No caller waits for process startup or I/O. */
@@ -54,8 +58,9 @@ class SpikeHost(
     }
 
     /** The shutdown deadline is independent of the writer, even when its pipe is full. */
-    fun stop() {
-        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(shutdownTimeoutMs)
+    @JvmOverloads
+    fun stop(timeoutMs: Long = shutdownTimeoutMs) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
         val stopping = gate.withLock {
             when (state) {
                 State.NEW -> state = State.STOPPED
@@ -70,6 +75,17 @@ class SpikeHost(
         if (stopping == State.STOPPING) background("mush host shutdown") { enforceShutdown(deadline) }
         else termination.complete(Unit)
         notifyState(stopping)
+    }
+
+    /**
+     * Ends the host if it is the likely reason the UI thread is stuck. Both must have gone quiet: the UI alone stalls
+     * during ordinary IDE work and a host alone stalls at a breakpoint or in a slow load, and neither should end a host.
+     */
+    fun stopIfFreezingUi(uiSeenAt: Long, limitNs: Long): Boolean {
+        val now = System.nanoTime()
+        if (now - uiSeenAt <= limitNs || now - lastOutputAt <= limitNs) return false
+        stop(0)
+        return true
     }
 
     private fun launchAndWrite(command: List<String>) {
@@ -135,9 +151,11 @@ class SpikeHost(
         try {
             started.inputStream.bufferedReader(StandardCharsets.UTF_8).useLines { lines ->
                 for (line in lines) {
+                    lastOutputAt = System.nanoTime()
                     if (state != State.RUNNING) continue
                     if (!line.startsWith("mush:")) {
                         if (line.contains("ERROR")) LOG.warn("host: $line")
+                        GODOT_ERROR.matchEntire(line)?.let { deliver("problem ${it.groupValues[1]}") }
                         continue
                     }
                     val reply = line.removePrefix("mush:")
@@ -149,18 +167,21 @@ class SpikeHost(
                         }
                         gate.withLock { if (state == State.RUNNING) hwnd = handle }
                     }
-                    if (state == State.RUNNING) {
-                        try {
-                            onReply(reply)
-                        } catch (e: Exception) {
-                            LOG.warn("host reply handler failed", e)
-                        }
-                    }
+                    deliver(reply)
                 }
             }
             if (state == State.RUNNING && started.isAlive) fail("Host output closed before exit")
         } catch (e: IOException) {
             fail("Host output closed: ${e.message}")
+        }
+    }
+
+    private fun deliver(reply: String) {
+        if (state != State.RUNNING) return
+        try {
+            onReply(reply)
+        } catch (e: Exception) {
+            LOG.warn("host reply handler failed", e)
         }
     }
 
@@ -223,6 +244,7 @@ class SpikeHost(
 
     private companion object {
         val LOG = logger<SpikeHost>()
+        val GODOT_ERROR = Regex("""(?:USER |SCRIPT |SHADER )?ERROR: (.+)""")
         fun background(name: String, action: () -> Unit) = Thread(action, name).apply { isDaemon = true }.start()
     }
 }

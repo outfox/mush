@@ -12,5 +12,6 @@
     <PackageReference Include="2dog.engine" Version="4.7.2.119" />
     <Compile Include="../../MushHost/ViewCamera.cs" Link="ViewCamera.cs" />
     <Compile Include="../../MushHost/ViewSettings.cs" Link="ViewSettings.cs" />
+    <Compile Include="../../MushHost/NodeSelection.cs" Link="NodeSelection.cs" />
   </ItemGroup>
 </Project>

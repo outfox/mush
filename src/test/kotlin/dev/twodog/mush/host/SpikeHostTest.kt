@@ -114,6 +114,36 @@ class SpikeHostTest {
         assertFalse(host.isStarted)
     }
 
+    @Test fun `Godot errors reach the editor as problems and other output does not`() {
+        Fixture("godot-output").use { fixture ->
+            val replies = java.util.concurrent.CopyOnWriteArrayList<String>()
+            val done = CountDownLatch(1)
+            fixture.onReply = {
+                replies += it
+                if (it == "reply done") done.countDown()
+            }
+            fixture.start()
+            assertTrue(fixture.host.send("done"))
+            assertTrue(done.await(3, TimeUnit.SECONDS))
+            assertEquals(listOf("problem plain", "problem from a script", "reply done"), replies.filter { it != "hwnd 12345" })
+        }
+    }
+
+    @Test fun `only a stuck UI together with a silent host ends the host`() {
+        Fixture("non-reading").use { fixture ->
+            fixture.start()
+            val longAgo = System.nanoTime() - TimeUnit.SECONDS.toNanos(60)
+            assertFalse("ordinary IDE stall, host fine", fixture.host.stopIfFreezingUi(longAgo, TimeUnit.SECONDS.toNanos(30)))
+            Thread.sleep(600)
+            val limit = TimeUnit.MILLISECONDS.toNanos(500)
+            assertFalse("breakpoint or slow load, UI fine", fixture.host.stopIfFreezingUi(System.nanoTime(), limit))
+            assertTrue(fixture.process.get().isAlive)
+            assertTrue(fixture.host.stopIfFreezingUi(longAgo, limit))
+            assertTrue("a stuck UI and a silent host did not end it", fixture.process.get().waitFor(3, TimeUnit.SECONDS))
+            await { fixture.host.state == SpikeHost.State.STOPPED }
+        }
+    }
+
     @Test fun `a malformed HWND cannot kill the reader`() {
         Fixture("malformed").use { fixture ->
             fixture.start()

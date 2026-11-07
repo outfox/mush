@@ -9,6 +9,5 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="2dog.engine" Version="4.7.2.119" />
-    <Compile Include="../../MushHost/GpuFrameProtocol.cs" Link="GpuFrameProtocol.cs" />
   </ItemGroup>
 </Project>

@@ -275,7 +275,7 @@ public final class Harness {
 
     private void sendText() {
         try {
-            host.send("text " + options.scene + " " + base64(text.getText()));
+            host.send("text " + base64(text.getText()) + " " + options.scene);
         } catch (UncheckedIOException e) {
             log("text failed: " + e.getMessage());
         }
@@ -349,7 +349,7 @@ public final class Harness {
         for (var i = 1; i <= 10; i++) {
             var edited = original.replace("text = \"mush sample 2D\"", "text = \"edit " + i + "\"");
             var start = System.nanoTime();
-            host.send("text " + options.scene + " " + base64(edited));
+            host.send("text " + base64(edited) + " " + options.scene);
             host.await("loaded", 10_000);
             latencies.add((System.nanoTime() - start) / 1e6);
             Thread.sleep(100);

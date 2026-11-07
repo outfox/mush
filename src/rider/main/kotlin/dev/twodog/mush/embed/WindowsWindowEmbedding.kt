@@ -7,6 +7,8 @@ import com.sun.jna.Pointer
 import java.awt.Component
 import java.awt.Rectangle
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import javax.swing.JWindow
@@ -21,18 +23,35 @@ internal class WindowsWindowEmbedding(private val detachInput: Boolean) : Native
     private var lastSize: Rectangle? = null
     private var shown = false
 
+    // Style changes, reparenting and synchronous moves wait for the host's message pump, which a hung host never runs.
+    // They run here one at a time, so neither the EDT nor a shared pool can get stuck behind that host.
+    private val foreignCalls = Executors.newSingleThreadExecutor { Thread(it, "mush foreign window").apply { isDaemon = true } }
+    private var lastForeignCall: Future<*> = CompletableFuture.completedFuture(null)
+
+    private fun foreignCall(call: () -> Unit) {
+        lastForeignCall = foreignCalls.submit {
+            try {
+                call()
+            } catch (e: Exception) {
+                LOG.warn("foreign window call failed", e)
+            }
+        }
+    }
+
     override fun embed(child: Long, parent: Component) {
         val parentHwnd = Native.getComponentID(parent)
-        val style = user32.GetWindowLongPtrW(child, GWL_STYLE)
-        if (style and WS_CHILD == 0L) {
-            val childStyle = (style and (WS_POPUP or WS_CAPTION or WS_THICKFRAME or WS_SYSMENU or WS_MINIMIZEBOX or WS_MAXIMIZEBOX).inv()) or
-                WS_CHILD or WS_CLIPSIBLINGS or WS_CLIPCHILDREN
-            user32.SetWindowLongPtrW(child, GWL_STYLE, childStyle)
+        foreignCall {
+            val style = user32.GetWindowLongPtrW(child, GWL_STYLE)
+            if (style and WS_CHILD == 0L) {
+                val childStyle = (style and (WS_POPUP or WS_CAPTION or WS_THICKFRAME or WS_SYSMENU or WS_MINIMIZEBOX or WS_MAXIMIZEBOX).inv()) or
+                    WS_CHILD or WS_CLIPSIBLINGS or WS_CLIPCHILDREN
+                user32.SetWindowLongPtrW(child, GWL_STYLE, childStyle)
+            }
+            user32.SetParent(child, parentHwnd)
+            // SetParent across threads joins the input queues; detaching keeps a stalled host from stalling the IDE.
+            if (detachInput)
+                user32.AttachThreadInput(user32.GetWindowThreadProcessId(child, null), user32.GetWindowThreadProcessId(parentHwnd, null), false)
         }
-        user32.SetParent(child, parentHwnd)
-        // SetParent across threads joins the input queues; detaching keeps a stalled host from stalling the IDE.
-        if (detachInput)
-            user32.AttachThreadInput(user32.GetWindowThreadProcessId(child, null), user32.GetWindowThreadProcessId(parentHwnd, null), false)
         lastSize = null
         shown = false
     }
@@ -40,12 +59,23 @@ internal class WindowsWindowEmbedding(private val detachInput: Boolean) : Native
     /**
      * Moves the child under a hidden window that lives as long as the IDE. It stays a `WS_CHILD` and is never
      * top-level, so it cannot flash at the screen origin while its old parent is torn down.
+     * Returns false if the child did not get there, such as when a hung host cannot answer. It goes with the old parent
+     * then, so that host is doomed.
      */
-    override fun park(child: Long) {
-        user32.SetParent(child, ParkingWindow.hwnd)
+    override fun park(child: Long): Boolean {
+        val parkingWindow = ParkingWindow.hwnd
+        val reparented = CompletableFuture<Boolean>()
+        foreignCall { reparented.complete(user32.SetParent(child, parkingWindow) != 0L) }
+        val parked = try {
+            reparented.get(PARK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (_: TimeoutException) {
+            LOG.info("park: timed out")
+            false
+        }
         user32.ShowWindowAsync(child, SW_HIDE)
         lastSize = null
         shown = false
+        return parked
     }
 
     /**
@@ -53,6 +83,8 @@ internal class WindowsWindowEmbedding(private val detachInput: Boolean) : Native
      * stale size and a host stuck on a breakpoint cannot block the caller.
      */
     override fun sync(child: Long, parent: Component) {
+        // Showing before SetParent finishes would flash the child as a top-level window.
+        if (!lastForeignCall.isDone) return
         val rect = clientRect(Native.getComponentID(parent))
         val visible = parent.isShowing && rect.width > 0 && rect.height > 0
         if (visible && (!shown || rect != lastSize)) {
@@ -74,13 +106,12 @@ internal class WindowsWindowEmbedding(private val detachInput: Boolean) : Native
      */
     override fun resizeBeforeShow(child: Long, parent: Component, timeoutMs: Long) {
         val rect = clientRect(Native.getComponentID(parent))
-        if (rect.isEmpty)
+        // An unfinished call means a hung host; a stale queued resize would only overwrite sync's later one.
+        if (rect.isEmpty || !lastForeignCall.isDone)
             return
-        val resize = CompletableFuture.runAsync {
-            user32.SetWindowPos(child, 0, 0, 0, rect.width, rect.height, SWP_NOZORDER or SWP_NOACTIVATE)
-        }
+        foreignCall { user32.SetWindowPos(child, 0, 0, 0, rect.width, rect.height, SWP_NOZORDER or SWP_NOACTIVATE) }
         try {
-            resize.get(timeoutMs, TimeUnit.MILLISECONDS)
+            lastForeignCall.get(timeoutMs, TimeUnit.MILLISECONDS)
             lastSize = rect
             LOG.info("resizeBeforeShow: $rect")
         } catch (_: TimeoutException) {
@@ -109,6 +140,8 @@ internal class WindowsWindowEmbedding(private val detachInput: Boolean) : Native
     }
 
     override fun clientSize(parent: Component): Rectangle = clientRect(Native.getComponentID(parent))
+
+    override fun close() = foreignCalls.shutdown()
 
     private fun clientRect(hwnd: Long): Rectangle {
         val r = IntArray(4)
@@ -152,6 +185,8 @@ internal class WindowsWindowEmbedding(private val detachInput: Boolean) : Native
         val gdi32: Gdi32 by lazy { Native.load("gdi32", Gdi32::class.java) }
         val LOG = logger<WindowsWindowEmbedding>()
 
+        // Long enough that a host busy loading a scene is not mistaken for a hung one.
+        const val PARK_TIMEOUT_MS = 2000L
         const val GWL_STYLE = -16
         const val WS_CHILD = 0x40000000L
         const val WS_POPUP = 0x80000000L

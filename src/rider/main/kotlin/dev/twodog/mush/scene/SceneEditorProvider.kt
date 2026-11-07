@@ -24,7 +24,7 @@ class SceneEditorProvider : FileEditorProvider, DumbAware {
 
     override fun createEditor(project: Project, file: VirtualFile): FileEditor {
         val text = TextEditorProvider.getInstance().createEditor(project, file) as TextEditor
-        val viewport = SceneViewportEditor(file, text.editor.document)
+        val viewport = SceneViewportEditor(project, file, text.editor)
         return SceneSplitEditor(text, viewport)
     }
 

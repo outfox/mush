@@ -10,6 +10,9 @@ namespace Mush.Spike;
 /// </summary>
 internal static class Program
 {
+    // Low enough to idle, high enough that commands for a hidden tab are not left waiting.
+    private const int HiddenMaxFps = 5;
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -26,12 +29,12 @@ internal static class Program
         using var engine = new Engine("mush", args: godotArgs.ToArray());
         engine.Start();
 
-        // Diagnostics: blue is Godot's frame, grey is the IDE behind it.
-        RenderingServer.SetDefaultClearColor(new Color(0.15f, 0.25f, 0.45f));
-
         var tree = engine.Tree;
+        // shortcut: stops motion and scene input, not constructors or _Ready; replace with the Frozen policy (milestone 5).
+        tree.Paused = true;
         var loader = new SceneLoader(tree);
         var camera = new ViewCamera(tree.Root);
+        var selection = new NodeSelection(tree.Root, () => loader.Current, path => Emit("selected", path));
         Emit("hwnd", DisplayServer.WindowGetNativeHandle(DisplayServer.HandleType.WindowHandle).ToString());
 
         var commands = new PendingCommands();
@@ -50,10 +53,11 @@ internal static class Program
 
         while (!engine.Iteration())
         {
+            selection.Redraw();
             // Leave time for a frame even when producers keep submitting commands.
             for (var i = 0; i < 16 && commands.TryDequeue(out var line); i++)
             {
-                if (!Execute(line, loader, camera))
+                if (!Execute(line, loader, camera, selection))
                 {
                     engine.RequestQuit();
                     break;
@@ -64,11 +68,14 @@ internal static class Program
         return 0;
     }
 
-    private static bool Execute(string line, SceneLoader loader, ViewCamera camera)
+    private static bool Execute(string line, SceneLoader loader, ViewCamera camera, NodeSelection selection)
     {
-        var parts = line.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+        // Spacing between fields is free. Scene paths come last and stay whole, including any spaces inside them.
+        const StringSplitOptions fields = StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries;
+        var parts = line.Split(' ', 3, fields);
         if (parts.Length == 0)
             return true;
+        string AfterVerb() => line.Split(' ', 2, fields)[1];
 
         try
         {
@@ -76,16 +83,29 @@ internal static class Program
             {
                 case "quit":
                     return false;
-                case "load" when parts.Length == 2:
-                    Report(parts[1], loader.Load(parts[1], text: null), loader, camera);
+                case "load" when parts.Length >= 2:
+                    LoadScene(AfterVerb(), text: null, loader, camera);
                     break;
                 // Unsaved document text travels in-band as base64, so no temp file can race the editor.
                 case "text" when parts.Length == 3:
-                    Report(parts[1], loader.Load(parts[1], Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]))), loader, camera);
+                    LoadScene(parts[2], Encoding.UTF8.GetString(Convert.FromBase64String(parts[1])), loader, camera);
                     break;
                 case "view":
                     camera.Configure(ViewSettings.Parse(line));
                     Emit("view", camera.Settings.Command[5..]);
+                    break;
+                case "reset":
+                    camera.ResetView();
+                    break;
+                case "select":
+                    selection.Select(parts.Length >= 2 ? AfterVerb() : null);
+                    break;
+                // shortcut: process-wide, fine while each editor has its own host; make it per-scratch with the shared host.
+                case "visible" when parts.Length == 2:
+                    Godot.Engine.MaxFps = parts[1] == "1" ? 0 : HiddenMaxFps;
+                    break;
+                case "ping":
+                    Emit("pong", "");
                     break;
                 // Blocks the engine thread like a debugger breakpoint would.
                 case "stall" when parts.Length == 2:
@@ -115,8 +135,11 @@ internal static class Program
         return true;
     }
 
-    private static void Report(string resPath, SceneLoader.Timing timing, SceneLoader loader, ViewCamera camera)
+    private static void LoadScene(string resPath, string? text, SceneLoader loader, ViewCamera camera)
     {
+        // Godot's errors reach the plugin on the same pipe; this marks where the ones for this load begin.
+        Emit("loading", resPath);
+        var timing = loader.Load(resPath, text);
         camera.Attach(loader.Current!, resPath);
         Emit("view", camera.Settings.Command[5..]);
         Emit("loaded", $"parse={timing.ParseMs:F1}ms instantiate={timing.InstantiateMs:F1}ms");

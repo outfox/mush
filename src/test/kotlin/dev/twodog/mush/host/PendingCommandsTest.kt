@@ -28,6 +28,26 @@ class PendingCommandsTest {
         assertEquals("text newest", queue.poll())
     }
 
+    @Test fun `editor state keeps only the latest value`() {
+        for ((first, latest) in listOf("select a" to "select b", "select a" to "select", "visible 1" to "visible 0", "ping" to "ping")) {
+            val queue = PendingCommands()
+            assertTrue(queue.offer(first))
+            assertTrue(queue.offer(latest))
+            assertEquals(latest, queue.poll())
+            assertNull(queue.poll())
+        }
+    }
+
+    @Test fun `malformed commands cannot evict a pending update`() {
+        for ((valid, malformed) in listOf("text good res://scene.tscn" to "text", "text good res://scene.tscn" to "text  ", "view 1 1 2d" to "view", "visible 1" to "visible")) {
+            val queue = PendingCommands()
+            assertTrue(queue.offer(valid))
+            assertTrue(queue.offer(malformed))
+            assertEquals(valid, queue.poll())
+            assertEquals(malformed, queue.poll())
+        }
+    }
+
     @Test fun `view changes stay bounded alongside document state and earlier controls`() {
         val queue = PendingCommands(3)
         assertTrue(queue.offer("view 1 1 2d"))
