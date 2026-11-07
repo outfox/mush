@@ -2,6 +2,10 @@ package dev.twodog.mush.scene
 
 import org.junit.Assert.*
 import org.junit.Test
+import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class SceneTextTest {
     private val scene = """
@@ -19,6 +23,9 @@ class SceneTextTest {
         offset_left = 20.0
         text = "a string can run over lines
         [not a section] even looking like this
+        [node name=\"Fake\" parent=\".\"] or exactly like this
+        [ext_resource path=\"fake\"] or this
+        and an \"escaped quote\" does not end it
         keeps its section"
 
         [connection signal="pressed" from="UI" to="."]
@@ -36,6 +43,25 @@ class SceneTextTest {
 
     @Test fun `a multi-line string cannot start a new section`() {
         assertEquals("UI/Label", SceneText.nodePathAt(scene, lineOf("keeps its section")))
+        assertEquals("UI/Label", SceneText.nodePathAt(scene, lineOf("[node name=\\\"Fake\\\"")))
+        assertEquals("UI/Label", SceneText.nodePathAt(scene, lineOf("[ext_resource path=\\\"fake\\\"")))
+        assertEquals("a click cannot land in string content",
+            lineOf("[node name=\"Root\""), SceneText.lineOfNode(scene, "Fake"))
+    }
+
+    @Test fun `escaped names and parents decode to the real node path`() {
+        val escaped = """
+            [gd_scene format=3]
+
+            [node name="Root" type="Node"]
+
+            [node name="back\\slash" type="Node" parent="."]
+
+            [node name="Child" type="Node" parent="back\\slash"]
+        """.trimIndent()
+        assertEquals("""back\slash""", SceneText.nodePathAt(escaped, 4))
+        assertEquals("""back\slash/Child""", SceneText.nodePathAt(escaped, 6))
+        assertEquals(6, SceneText.lineOfNode(escaped, """back\slash/Child"""))
     }
 
     @Test fun `other sections select nothing`() {
@@ -67,12 +93,38 @@ class SceneTextTest {
         assertNull(SceneText.problemLine("Resource file not found: res://art/typo.svg (expected type: Texture2D)"))
     }
 
+    @Test fun `hosts starting together all get the blank scene`() {
+        val root = Files.createTempDirectory("mush-blank")
+        val pool = Executors.newFixedThreadPool(8)
+        try {
+            repeat(50) { round ->
+                val project = root.resolve("p$round")
+                val start = CountDownLatch(1)
+                val publishers = List(8) {
+                    pool.submit {
+                        start.await()
+                        GodotProject.ensureBlankScene(project.toString())
+                    }
+                }
+                start.countDown()
+                publishers.forEach { it.get(5, TimeUnit.SECONDS) }
+                val dir = project.resolve(".godot/mush")
+                assertEquals(listOf("blank.tscn"), Files.list(dir).use { files -> files.map { it.fileName.toString() }.toList() })
+                assertTrue(Files.readString(dir.resolve("blank.tscn")).contains("MushBlank"))
+            }
+        } finally {
+            pool.shutdownNow()
+            root.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun `only other scene files in the project trigger a reload`() {
         val root = "P:/game"
         val self = "P:/game/scenes/a.tscn"
         assertTrue(GodotProject.isSceneDependency("P:/game/scenes/b.tscn", root, self))
         assertTrue(GodotProject.isSceneDependency("P:/game/theme.TRES", root, self))
         assertTrue(GodotProject.isSceneDependency("P:/game/fx.gdshader", root, self))
+        assertTrue(GodotProject.isSceneDependency("P:/game/common.gdshaderinc", root, self))
         assertFalse("its own saves already reached the host", GodotProject.isSceneDependency(self, root, self))
         assertFalse("the host's own temp files would loop", GodotProject.isSceneDependency("P:/game/.godot/mush/x.tscn", root, self))
         assertFalse(GodotProject.isSceneDependency("P:/other/b.tscn", root, self))

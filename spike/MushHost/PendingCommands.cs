@@ -37,8 +37,14 @@ internal sealed class PendingCommands(int capacity = 32)
 
     private static string? StateKey(string command)
     {
-        var verb = command.Split(' ', 2)[0];
-        return verb is "text" or "view" or "stats" or "select" or "visible" or "ping" ? verb : null;
+        var parts = command.Split(' ', 2);
+        return parts[0] switch
+        {
+            "stats" or "select" or "ping" => parts[0],
+            // Without a payload these are malformed, and must not evict a valid pending update.
+            "text" or "view" or "visible" when parts.Length == 2 => parts[0],
+            _ => null
+        };
     }
 
     public bool TryDequeue([NotNullWhen(true)] out string? command)

@@ -41,14 +41,19 @@ internal static class Program
             ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded
         };
         scene.AddChild(new MeshInstance3D { Name = "Box", Mesh = mesh, MaterialOverride = material });
-        var worldRect = new ColorRect { Position = new Vector2(20, 20), Size = new Vector2(40, 40), Color = Colors.Red };
+        var worldRect = new ColorRect { Name = "WorldRect", Position = new Vector2(20, 20), Size = new Vector2(40, 40), Color = Colors.Red };
         var world2D = new Node2D { Name = "World2D" };
         world2D.AddChild(worldRect);
         scene.AddChild(world2D);
         var layer = new CanvasLayer { Name = "Ui" };
         var uiRect = new ColorRect { Name = "UiRect", Position = new Vector2(100, 20), Size = new Vector2(40, 40), Color = Colors.Green };
         layer.AddChild(uiRect);
+        // Draw order differs from tree order in both pairs: the layer draws over what follows it, and z_index beats order.
+        layer.AddChild(new ColorRect { Name = "UiCover", Position = new Vector2(500, 400), Size = new Vector2(40, 40) });
         scene.AddChild(layer);
+        scene.AddChild(new ColorRect { Name = "UnderUi", Position = new Vector2(500, 400), Size = new Vector2(40, 40) });
+        scene.AddChild(new ColorRect { Name = "RaisedZ", ZIndex = 1, Position = new Vector2(560, 400), Size = new Vector2(40, 40) });
+        scene.AddChild(new ColorRect { Name = "LowerZ", Position = new Vector2(560, 400), Size = new Vector2(40, 40) });
         root.AddChild(scene);
         tree.CurrentScene = scene;
         OwnChildren(scene);
@@ -89,6 +94,14 @@ internal static class Program
         Check(picked is [_, "Box"], "clicking 3D picks its node");
         Click(new Vector2(600, 10));
         Check(picked.Count == 2, "clicking empty space picks nothing");
+        Click(new Vector2(520, 420));
+        Check(picked[^1] == "Ui/UiCover", $"a click picks the node drawn on top across canvas layers, got {picked[^1]}");
+        Click(new Vector2(580, 420));
+        Check(picked[^1] == "RaisedZ", $"a click picks the node drawn on top by z_index, got {picked[^1]}");
+        Check(NodeSelection.EntryAlongRay(new Aabb(Vector3.Zero, Vector3.One), new Vector3(0, 0.5f, -1), Vector3.Back) is 1f,
+            "a ray parallel to a box face and starting on it still hits the box");
+        Check(NodeSelection.EntryAlongRay(new Aabb(Vector3.Zero, Vector3.One), new Vector3(-1, 0.5f, -1), Vector3.Back) is null,
+            "a parallel ray outside the box misses it");
         selection.Select(null);
 
         var initial3D = root.GetCamera3D()!.GlobalTransform;
@@ -111,6 +124,26 @@ internal static class Program
         EmitInput(new InputEventMouseButton { ButtonIndex = MouseButton.WheelUp, Pressed = true, Position = cursor });
         Check((root.GlobalCanvasTransform * pointBefore).IsEqualApprox(cursor), "2D zoom anchors the cursor");
         Check(root.GetCamera3D()!.GlobalTransform.IsEqualApprox(initial3D), "2D zoom preserves 3D camera");
+
+        // After pan and zoom, outlines and clicks must both land where the nodes are drawn, in and out of canvas layers.
+        foreach (var (path, topEdge, center) in new[]
+        {
+            ("World2D/WorldRect", new Vector2(40, 20), new Vector2(40, 40)),
+            ("Ui/UiRect", new Vector2(120, 20), new Vector2(120, 40))
+        })
+        {
+            selection.Select(path);
+            using (var image = Snapshot())
+            {
+                var edge = root.GlobalCanvasTransform * topEdge;
+                Check(IsColor(image.GetPixel(Mathf.RoundToInt(edge.X), Mathf.RoundToInt(edge.Y)), NodeSelection.OutlineColor),
+                    $"the outline of {path} lands on the node at {edge} after pan and zoom");
+            }
+            selection.Select(null);
+            Click(root.GlobalCanvasTransform * center);
+            Check(picked[^1] == path, $"a click on {path} after pan and zoom picked {picked[^1]}");
+        }
+        selection.Select(null);
         var canvasBefore3D = root.GlobalCanvasTransform;
 
         camera.Configure(new ViewSettings(true, true, ViewMode.ThreeD));

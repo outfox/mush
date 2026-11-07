@@ -81,13 +81,22 @@ internal static class HostProtocolProbe
             Require(host.Push(scene, "[node name=").StartsWith("mush:error"), "a syntax error is reported");
             Require(host.Ask("count", "mush:count") == "mush:count 2", "a syntax error keeps the last good scene");
 
-            Require(host.Push(scene, "").StartsWith("mush:error cannot parse"), "an empty document is a parse error, not a bad command");
+            // The base64 field cannot be empty, so the plugin sends an empty document as one newline.
+            Require(host.Push(scene, "\n").StartsWith("mush:error cannot parse"), "an empty document is a parse error, not a bad command");
             Require(host.Ask("count", "mush:count") == "mush:count 2", "an empty document keeps the last good scene");
 
             var withSpace = "res://scenes/a scene with spaces.tscn";
             Require(host.Push(withSpace, good).StartsWith("mush:loaded"), "unsaved text loads for a path with spaces");
             host.Send($"load {withSpace}");
             Require(host.ReadLoad() == $"mush:error cannot load {withSpace}", "a disk load keeps the whole path");
+
+            host.Send($"load   {withSpace}  ");
+            Require(host.ReadLoad() == $"mush:error cannot load {withSpace}", "spacing around a path is not part of it");
+            var doubleSpaced = "res://scenes/two  spaces.tscn";
+            host.Send($"load {doubleSpaced}");
+            Require(host.ReadLoad() == $"mush:error cannot load {doubleSpaced}", "spacing inside a path is part of it");
+            host.Send($"text   {DocumentHost.Encoded(good)}   {scene}  ");
+            Require(host.ReadLoad().StartsWith("mush:loaded"), "spacing between text fields is free");
 
             Require(host.Push(scene, InlineScript("queue_free()")).StartsWith("mush:loaded"), "a self-freeing scene loads");
             host.Ask("ping", "mush:pong"); // Let the deferred free run.
@@ -156,7 +165,9 @@ internal static class HostProtocolProbe
 
         public void Send(string command) => _process.StandardInput.WriteLine(command);
 
-        public void SendText(string path, string text) => Send($"text {Convert.ToBase64String(Encoding.UTF8.GetBytes(text))} {path}");
+        public static string Encoded(string text) => Convert.ToBase64String(Encoding.UTF8.GetBytes(text));
+
+        public void SendText(string path, string text) => Send($"text {Encoded(text)} {path}");
 
         public string Push(string path, string text)
         {
@@ -166,10 +177,13 @@ internal static class HostProtocolProbe
 
         public string ReadLoad() => Read(line => line.StartsWith("mush:loaded") || line.StartsWith("mush:error"));
 
+        // Fails on any error since the last load, including from commands sent without asking for a reply.
         public string Ask(string command, string replyPrefix)
         {
             Send(command);
-            return Read(line => line.StartsWith(replyPrefix));
+            return Read(line => line.StartsWith("mush:error")
+                ? throw new InvalidOperationException($"Host reported an error before {command} replied: {line}")
+                : line.StartsWith(replyPrefix));
         }
 
         private string Read(Func<string, bool> wanted)

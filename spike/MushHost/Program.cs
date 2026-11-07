@@ -70,10 +70,12 @@ internal static class Program
 
     private static bool Execute(string line, SceneLoader loader, ViewCamera camera, NodeSelection selection)
     {
-        if (string.IsNullOrWhiteSpace(line))
+        // Spacing between fields is free. Scene paths come last and stay whole, including any spaces inside them.
+        const StringSplitOptions fields = StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries;
+        var parts = line.Split(' ', 3, fields);
+        if (parts.Length == 0)
             return true;
-        // Scene paths can contain spaces, so they come last and stay whole. Base64 is empty for an empty document.
-        var parts = line.Split(' ', 3);
+        string AfterVerb() => line.Split(' ', 2, fields)[1];
 
         try
         {
@@ -82,7 +84,7 @@ internal static class Program
                 case "quit":
                     return false;
                 case "load" when parts.Length >= 2:
-                    LoadScene(line["load ".Length..], text: null, loader, camera);
+                    LoadScene(AfterVerb(), text: null, loader, camera);
                     break;
                 // Unsaved document text travels in-band as base64, so no temp file can race the editor.
                 case "text" when parts.Length == 3:
@@ -96,7 +98,7 @@ internal static class Program
                     camera.ResetView();
                     break;
                 case "select":
-                    selection.Select(parts.Length >= 2 ? line["select ".Length..] : null);
+                    selection.Select(parts.Length >= 2 ? AfterVerb() : null);
                     break;
                 // shortcut: process-wide, fine while each editor has its own host; make it per-scratch with the shared host.
                 case "visible" when parts.Length == 2:

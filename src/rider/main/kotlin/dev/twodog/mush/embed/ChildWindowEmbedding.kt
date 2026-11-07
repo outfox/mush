@@ -25,7 +25,7 @@ class ChildWindowEmbedding(detachInput: Boolean) {
     val hostArguments: List<String> get() = platform.hostArguments
 
     fun embed(child: Long, parent: Component) = native.value.embed(child, parent)
-    /** False when the child's host is hung, and so loses its window along with the child's parent. */
+    /** False when the child stays behind, such as under a hung host, and so goes with its parent. */
     fun park(child: Long): Boolean = native.value.park(child)
     fun sync(child: Long, parent: Component) = native.value.sync(child, parent)
     fun resizeBeforeShow(child: Long, parent: Component, timeoutMs: Long) = native.value.resizeBeforeShow(child, parent, timeoutMs)

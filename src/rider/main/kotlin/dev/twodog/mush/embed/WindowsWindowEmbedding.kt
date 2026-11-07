@@ -59,14 +59,15 @@ internal class WindowsWindowEmbedding(private val detachInput: Boolean) : Native
     /**
      * Moves the child under a hidden window that lives as long as the IDE. It stays a `WS_CHILD` and is never
      * top-level, so it cannot flash at the screen origin while its old parent is torn down.
-     * A hung host cannot finish this. Returns false then: its child goes with the old parent, so that host is doomed.
+     * Returns false if the child did not get there, such as when a hung host cannot answer. It goes with the old parent
+     * then, so that host is doomed.
      */
     override fun park(child: Long): Boolean {
         val parkingWindow = ParkingWindow.hwnd
-        foreignCall { user32.SetParent(child, parkingWindow) }
+        val reparented = CompletableFuture<Boolean>()
+        foreignCall { reparented.complete(user32.SetParent(child, parkingWindow) != 0L) }
         val parked = try {
-            lastForeignCall.get(PARK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            true
+            reparented.get(PARK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         } catch (_: TimeoutException) {
             LOG.info("park: timed out")
             false

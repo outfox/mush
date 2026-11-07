@@ -29,6 +29,12 @@ public class P1Probe {
         boolean CloseHandle(Pointer process);
     }
 
+    // Embedding runs off the EDT; the probe needs it finished, not merely requested.
+    private static void awaitEmbedded(ChildWindowEmbedding embedding, long hwnd, Canvas canvas) throws InterruptedException {
+        for (long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5); !embedding.describe(hwnd, canvas).contains("inParent=true"); Thread.sleep(10))
+            if (System.nanoTime() > deadline) throw new AssertionError("The host window never reached the Canvas");
+    }
+
     public static void main(String[] args) throws Exception {
         var nt = Native.load("ntdll", NtDll.class);
         var kernel = Native.load("kernel32", Kernel32.class);
@@ -62,7 +68,21 @@ public class P1Probe {
                 frame.addNotify();
                 embedding.embed(hwnd, canvas);
             });
-            Thread.sleep(500); // Embedding runs off the EDT; suspend after it finished, not during it.
+            awaitEmbedded(embedding, hwnd, canvas);
+
+            // Parking must report what really happened: destroying the parent of a child still inside loses the child.
+            var healthyPark = new AtomicBoolean();
+            var deadPark = new AtomicBoolean(true);
+            SwingUtilities.invokeAndWait(() -> {
+                healthyPark.set(embedding.park(hwnd));
+                deadPark.set(embedding.park(0));
+                embedding.embed(hwnd, canvas);
+            });
+            System.out.printf("Parking: healthy host=%s; no such window=%s%n", healthyPark.get(), deadPark.get());
+            if (!healthyPark.get() || deadPark.get())
+                throw new AssertionError("Parking misreported whether the window moved");
+            awaitEmbedded(embedding, hwnd, canvas);
+
             processHandle = kernel.OpenProcess(0x800, false, (int) child.get().pid()); // PROCESS_SUSPEND_RESUME
             if (processHandle == null || nt.NtSuspendProcess(processHandle) != 0)
                 throw new IllegalStateException("Could not suspend the probe's child process");
@@ -90,8 +110,10 @@ public class P1Probe {
             if (nativeMs > 3000 || parked.get())
                 throw new AssertionError("Foreign window calls blocked the EDT or parking a suspended host claimed success");
 
+            // The writer took it, and a suspended receiver can never drain a write this much larger than the pipe.
             host.send("text " + "A".repeat(2_000_000) + " res://scene.tscn");
-            Thread.sleep(100); // The suspended receiver cannot drain this larger-than-pipe write.
+            for (long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3); host.pendingCommandCount() != 0; Thread.sleep(5))
+                if (System.nanoTime() > deadline) throw new AssertionError("The writer never took the large write");
             long start = System.nanoTime();
             SwingUtilities.invokeAndWait(() -> {
                 host.send("stats");

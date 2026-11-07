@@ -29,7 +29,6 @@ import com.intellij.util.Alarm
 import com.intellij.util.concurrency.AppExecutorUtil
 import dev.twodog.mush.embed.ChildWindowEmbedding
 import dev.twodog.mush.host.SpikeHost
-import dev.twodog.mush.host.isHostFreezingUi
 import java.awt.BorderLayout
 import java.awt.Canvas
 import java.awt.Color
@@ -41,7 +40,6 @@ import java.awt.event.HierarchyEvent
 import java.beans.PropertyChangeListener
 import java.util.Base64
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.SwingUtilities
@@ -175,8 +173,11 @@ class SceneViewportEditor(
 
         // Only reached when the Canvas could not step out first, e.g. when the editor closes.
         override fun removeNotify() {
-            if (host.hwnd != 0L && !embedding.park(host.hwnd))
-                endHungHost()
+            if (host.hwnd != 0L && !embedding.park(host.hwnd)) {
+                // A child window goes with its parent, so this host is about to lose its window anyway.
+                LOG.warn("$resPath: stopping a host that could not be parked")
+                host.stop(0)
+            }
             super.removeNotify()
         }
     }
@@ -254,11 +255,9 @@ class SceneViewportEditor(
         if (DEBUG && placeholder.isShowing) watched.send("stats")
         SwingUtilities.invokeLater { uiSeenAt = System.nanoTime() }
 
-        val now = System.nanoTime()
-        if (isHostFreezingUi(now, uiSeenAt, watched.lastOutputAt, UI_FROZEN_NS)) {
+        if (watched.stopIfFreezingUi(uiSeenAt, UI_FROZEN_NS)) {
             LOG.warn("$resPath: UI stuck and host silent for ${UI_FROZEN_NS / 1_000_000_000} s, stopping the host to free Rider")
-            watched.stop(0)
-        } else if (now - watched.lastOutputAt > NOT_RESPONDING_NS) {
+        } else if (System.nanoTime() - watched.lastOutputAt > NOT_RESPONDING_NS) {
             SwingUtilities.invokeLater {
                 if (!disposed && host === watched && watched.isStarted)
                     status.text = "Viewport not responding: a script or breakpoint is holding it. Use Restart Viewport to start over."
@@ -315,17 +314,6 @@ class SceneViewportEditor(
         if (disposed || !canvas.isDisplayable || host.hwnd == 0L) return
         embedding.embed(host.hwnd, canvas)
         update()
-    }
-
-    /** A child window goes with its parent, so a host that could not be parked is about to lose its window anyway. */
-    private fun endHungHost() {
-        LOG.warn("$resPath: stopping a hung host before its window's parent is destroyed")
-        host.stop(0)
-        try {
-            host.termination.get(HUNG_HOST_EXIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        } catch (_: TimeoutException) {
-            LOG.warn("$resPath: hung host did not exit in time")
-        }
     }
 
     /** The document and the view choices live here, so a new host picks up where the old one stopped. */
@@ -449,7 +437,8 @@ class SceneViewportEditor(
     private fun pushText() {
         if (disposed || !host.isStarted)
             return
-        val text = runReadActionBlocking { document.text }
+        // The base64 field cannot be empty, and to Godot a lone newline is just as empty a document.
+        val text = runReadActionBlocking { document.text }.ifEmpty { "\n" }
         // In-band, so no temp file can race the host or the editor. The path goes last because it can contain spaces.
         host.send("text ${Base64.getEncoder().encodeToString(text.toByteArray(Charsets.UTF_8))} $resPath")
     }
@@ -495,7 +484,6 @@ class SceneViewportEditor(
         const val RESIZE_BEFORE_SHOW_TIMEOUT_MS = 50L
         const val NOT_RESPONDING_NS = 3_000_000_000L
         const val UI_FROZEN_NS = 5_000_000_000L
-        const val HUNG_HOST_EXIT_TIMEOUT_MS = 1000L
         const val REMIX_BACKOFF_NS = 1_000_000_000L
         const val WATCH_AFTER_STEP_IN_NS = 600_000_000L
         val DEBUG = System.getenv("MUSH_DEBUG") == "1"

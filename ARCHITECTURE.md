@@ -578,8 +578,9 @@ The host also coalesces its incoming state and limits command work between engin
 - A headless real-host check submitted 1,000 snapshots during an engine-thread stall: one reload applied the final
   snapshot, and graceful quit completed.
 - The full Rider debugger gate remains open. Native calls that wait for the host's message pump (style changes,
-  reparenting, synchronous resizes) now run on a dedicated thread, and the suspension probe checks the EDT is not held
-  behind them.
+  reparenting, synchronous resizes) now run on a dedicated thread. The EDT still waits for two of them, within limits: up
+  to 50 ms for a resize before showing and up to 2 s for parking, which must finish before AWT destroys the old parent.
+  The UI stalls for that long when a host is hung. The suspension probe checks that these limits hold.
 - A hung host can still freeze all of Rider. In a sandbox test (2026-11-07) a host was suspended and a tab switched:
   parking timed out, then the EDT stuck in a synchronous toolkit call during tab removal
   (`WInputMethod.endCompositionNative`) for 8 minutes, ending the instant the host died. The exact cause is unproved. A
@@ -607,14 +608,16 @@ How the spike behaves today, until the scratch and Frozen milestones replace it 
 - **Trust.** No host starts in an untrusted project, because loading a scene can run its code.
 - **Stopgap for Frozen.** The tree is paused, which stops motion, physics and scene input. Constructors and `_Ready`
   still run on every reload, so this does not satisfy the contract above and must not be mistaken for it.
-- **Reloads.** `text <base64> <path>`; the path comes last because it can contain spaces. Each host has its own temp
-  file, deleted after loading, because split editors push the same edit at the same moment. Saving another `.tscn`,
-  `.tres` or `.gdshader` in the project reloads open scenes, since they only reread those on reload.
+- **Reloads.** `text <base64> <path>`; the path comes last because it can contain spaces, and an empty document travels
+  as one newline because the base64 field cannot be empty. Each host has its own temp file, deleted after loading,
+  because split editors push the same edit at the same moment. Saving another `.tscn`, `.tres`, `.gdshader` or
+  `.gdshaderinc` in the project reloads open scenes, since they only reread those on reload.
 - **Problems.** The host marks where each load starts, and the plugin counts Godot's `ERROR:` lines until it ends;
   errors at other times are about the engine, not this scene, and only reach the log. The status line shows the first
   one, and a parse error marks its line in the text.
 - **Text and picture.** The `[node]` section under the text cursor is outlined in the viewport; a click in the viewport
-  moves the cursor to that node's section, or its nearest ancestor with one. Clicks test bounds and reverse tree order.
+  moves the cursor to that node's section, or its nearest ancestor with one. Clicks test bounds, and pick the node drawn
+  on top by canvas layer, then `z_index`, then tree order.
 - **Recovery.** A once-a-second ping reports a stuck host after 3 s, and ends it if the UI is stuck too. Restart Viewport
   replaces the host at any time and keeps the document and view choices. It does not rebuild the host; C# changes still
   need a build first.

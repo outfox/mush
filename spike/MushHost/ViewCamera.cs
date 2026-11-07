@@ -10,6 +10,7 @@ namespace Mush.Spike;
 internal sealed class ViewCamera
 {
     /// <summary>Editor overlays stay visible when the scene's 2D/UI is hidden.</summary>
+    // shortcut: a scene node on visibility layer 20 also stays visible then, draw overlays in their own viewport if one does.
     public const uint OverlayLayer = 1u << 19;
 
     private const float ZoomStep = 1.1f;

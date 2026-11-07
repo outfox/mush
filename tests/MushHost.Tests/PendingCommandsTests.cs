@@ -66,6 +66,21 @@ public sealed class PendingCommandsTests
         Assert.False(commands.TryDequeue(out _));
     }
 
+    [Theory]
+    [InlineData("text good res://scene.tscn", "text")]
+    [InlineData("view 1 1 2d", "view")]
+    [InlineData("visible 1", "visible")]
+    public void MalformedCommandsCannotEvictAPendingUpdate(string valid, string malformed)
+    {
+        var commands = new PendingCommands();
+        Assert.True(commands.Enqueue(valid));
+        Assert.True(commands.Enqueue(malformed));
+        Assert.True(commands.TryDequeue(out var first));
+        Assert.Equal(valid, first);
+        Assert.True(commands.TryDequeue(out var second));
+        Assert.Equal(malformed, second);
+    }
+
     [Fact]
     public void ViewChangesCoalesceWithoutDiscardingDocumentOrControls()
     {

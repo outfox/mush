@@ -9,13 +9,6 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * Whether a hung host is the likely reason the UI thread is stuck. Both must have gone quiet: the UI alone stalls during
- * ordinary IDE work, and a host alone stalls at a breakpoint or in a slow load, and neither of those should end a host.
- */
-internal fun isHostFreezingUi(now: Long, uiSeenAt: Long, hostSeenAt: Long, limit: Long): Boolean =
-    now - uiSeenAt > limit && now - hostSeenAt > limit
-
-/**
  * The spike host process (`spike/MushHost`): line commands on stdin, `mush:`-prefixed replies on stdout.
  * Stands in for the planned pipe protocol until the real host exists.
  */
@@ -43,6 +36,7 @@ class SpikeHost(
     private var process: Process? = null
 
     val isStarted: Boolean get() = state == State.STARTING || state == State.RUNNING
+    @get:JvmName("pendingCommandCount")
     internal val pendingCommandCount: Int get() = gate.withLock { pending.size }
 
     /** One launcher per process lifetime. No caller waits for process startup or I/O. */
@@ -81,6 +75,17 @@ class SpikeHost(
         if (stopping == State.STOPPING) background("mush host shutdown") { enforceShutdown(deadline) }
         else termination.complete(Unit)
         notifyState(stopping)
+    }
+
+    /**
+     * Ends the host if it is the likely reason the UI thread is stuck. Both must have gone quiet: the UI alone stalls
+     * during ordinary IDE work and a host alone stalls at a breakpoint or in a slow load, and neither should end a host.
+     */
+    fun stopIfFreezingUi(uiSeenAt: Long, limitNs: Long): Boolean {
+        val now = System.nanoTime()
+        if (now - uiSeenAt <= limitNs || now - lastOutputAt <= limitNs) return false
+        stop(0)
+        return true
     }
 
     private fun launchAndWrite(command: List<String>) {

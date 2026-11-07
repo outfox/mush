@@ -6,8 +6,7 @@ internal class PendingCommands(private val capacity: Int = 32) {
     val size: Int get() = commands.size
 
     fun offer(command: String): Boolean {
-        val verb = command.substringBefore(' ')
-        if (verb in LATEST_ONLY) commands.removeAll { it.substringBefore(' ') == verb }
+        stateKey(command)?.let { key -> commands.removeAll { stateKey(it) == key } }
         if (commands.size >= capacity) return false
         commands.addLast(command)
         return true
@@ -17,6 +16,13 @@ internal class PendingCommands(private val capacity: Int = 32) {
     fun clear() = commands.clear()
 
     private companion object {
-        val LATEST_ONLY = setOf("text", "view", "stats", "select", "visible", "ping")
+        val STANDALONE = setOf("stats", "select", "ping")
+        val NEEDS_PAYLOAD = setOf("text", "view", "visible")
+
+        // Without a payload those are malformed, and must not evict a valid pending update.
+        fun stateKey(command: String): String? {
+            val verb = command.substringBefore(' ')
+            return verb.takeIf { it in STANDALONE || (it in NEEDS_PAYLOAD && ' ' in command) }
+        }
     }
 }

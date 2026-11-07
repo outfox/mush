@@ -115,24 +115,40 @@ internal sealed class NodeSelection
         _picked(path);
     }
 
-    // shortcut: reverse tree order ignores z_index and canvas layers, use the renderer's order if clicks pick wrong.
-    private static Node? Pick2D(Node node, Vector2 point)
+    // The node drawn last under the point: by canvas layer, then z_index, then tree order.
+    // shortcut: ignores y-sort, show_behind_parent and clipping, use the renderer's order if clicks pick wrong there.
+    private static Node? Pick2D(Node scene, Vector2 point)
     {
-        var children = node.GetChildren();
-        for (var i = children.Count - 1; i >= 0; i--)
+        Node? top = null;
+        var topOrder = (Layer: int.MinValue, Z: int.MinValue);
+        Visit(scene, 0, 0);
+        return top;
+
+        void Visit(Node node, int layer, int z)
         {
-            if (children[i] is not Viewport && Pick2D(children[i], point) is { } hit)
-                return hit;
+            if (node is CanvasLayer canvasLayer)
+                (layer, z) = (canvasLayer.Layer, 0);
+            if (node is CanvasItem item)
+                z = item.ZAsRelative ? z + item.ZIndex : item.ZIndex;
+            var rect = node switch
+            {
+                Control control when control.IsVisibleInTree() => new Rect2(Vector2.Zero, control.Size),
+                Sprite2D sprite when sprite.IsVisibleInTree() => sprite.GetRect(),
+                _ => (Rect2?)null
+            };
+            // Parents draw before children and earlier siblings before later ones, so equal order means this one is on top.
+            if (rect is { } local && (layer, z).CompareTo(topOrder) >= 0 &&
+                local.HasPoint(((CanvasItem)node).GetGlobalTransformWithCanvas().AffineInverse() * point))
+            {
+                top = node;
+                topOrder = (layer, z);
+            }
+            foreach (var child in node.GetChildren())
+            {
+                if (child is not Viewport)
+                    Visit(child, layer, z);
+            }
         }
-        var rect = node switch
-        {
-            Control control when control.IsVisibleInTree() => new Rect2(Vector2.Zero, control.Size),
-            Sprite2D sprite when sprite.IsVisibleInTree() => sprite.GetRect(),
-            _ => (Rect2?)null
-        };
-        return rect is { } local && local.HasPoint(((CanvasItem)node).GetGlobalTransformWithCanvas().AffineInverse() * point)
-            ? node
-            : null;
     }
 
     // shortcut: tests visual bounds only, so a concave mesh also catches clicks in its gaps; ray-test meshes if that annoys.
@@ -171,12 +187,19 @@ internal sealed class NodeSelection
     }
 
     // Godot's C# Aabb only answers whether a segment hits; picking the nearest node needs where the ray enters.
-    private static float? EntryAlongRay(Aabb box, Vector3 origin, Vector3 direction)
+    internal static float? EntryAlongRay(Aabb box, Vector3 origin, Vector3 direction)
     {
         var enter = 0f;
         var leave = float.MaxValue;
         for (var axis = 0; axis < 3; axis++)
         {
+            // Dividing by zero gives NaN for a ray starting on a face; a parallel ray is either between the faces or not.
+            if (direction[axis] == 0f)
+            {
+                if (origin[axis] < box.Position[axis] || origin[axis] > box.End[axis])
+                    return null;
+                continue;
+            }
             var a = (box.Position[axis] - origin[axis]) / direction[axis];
             var b = (box.End[axis] - origin[axis]) / direction[axis];
             enter = Mathf.Max(enter, Mathf.Min(a, b));

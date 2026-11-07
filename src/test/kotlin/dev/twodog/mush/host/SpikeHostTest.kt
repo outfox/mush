@@ -130,9 +130,18 @@ class SpikeHostTest {
     }
 
     @Test fun `only a stuck UI together with a silent host ends the host`() {
-        assertTrue(isHostFreezingUi(now = 100, uiSeenAt = 10, hostSeenAt = 10, limit = 50))
-        assertFalse("ordinary IDE stall, host fine", isHostFreezingUi(now = 100, uiSeenAt = 10, hostSeenAt = 90, limit = 50))
-        assertFalse("breakpoint or slow load, UI fine", isHostFreezingUi(now = 100, uiSeenAt = 90, hostSeenAt = 10, limit = 50))
+        Fixture("non-reading").use { fixture ->
+            fixture.start()
+            val longAgo = System.nanoTime() - TimeUnit.SECONDS.toNanos(60)
+            assertFalse("ordinary IDE stall, host fine", fixture.host.stopIfFreezingUi(longAgo, TimeUnit.SECONDS.toNanos(30)))
+            Thread.sleep(100)
+            val limit = TimeUnit.MILLISECONDS.toNanos(50)
+            assertFalse("breakpoint or slow load, UI fine", fixture.host.stopIfFreezingUi(System.nanoTime(), limit))
+            assertTrue(fixture.process.get().isAlive)
+            assertTrue(fixture.host.stopIfFreezingUi(longAgo, limit))
+            assertTrue("a stuck UI and a silent host did not end it", fixture.process.get().waitFor(3, TimeUnit.SECONDS))
+            await { fixture.host.state == SpikeHost.State.STOPPED }
+        }
     }
 
     @Test fun `a malformed HWND cannot kill the reader`() {
