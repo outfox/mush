@@ -44,6 +44,7 @@ import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.SwingUtilities
 import javax.swing.Timer
+import kotlin.math.abs
 
 /**
  * The viewport half of the scene editor: a spike host's Godot window embedded as a child of a heavyweight Canvas.
@@ -93,6 +94,7 @@ class SceneViewportEditor(
     private var sentVisible = true
     private var sentSelection: String? = null
     private var remixFailedAt = 0L
+    private var relocateFailedAt = 0L
     // The region empties when the outgoing tab leaves, shortly after a step in; watch it every frame until then.
     private var watchUntil = 0L
     private val watchTimer = Timer(16) {
@@ -199,6 +201,7 @@ class SceneViewportEditor(
         } else if (!inTab) {
             stepIn()
         } else {
+            relocateIfMisplaced()
             remixIfCutAway()
         }
         if (host.hwnd != 0L && canvas.isDisplayable)
@@ -222,6 +225,32 @@ class SceneViewportEditor(
         remixFailedAt = 0L
         watchUntil = System.nanoTime() + WATCH_AFTER_STEP_IN_NS
         watchTimer.restart()
+    }
+
+    /**
+     * After a DPI change, such as when the window moves to another screen, AWT can place the Canvas peer at its bounds
+     * within its direct parent, leaving out the offsets of its lightweight ancestors; the viewport then covers the
+     * window's corner. The native location reads back through the peer; moving the Canvas makes AWT place it again.
+     */
+    private fun relocateIfMisplaced() {
+        if (!canvas.isShowing || System.nanoTime() - relocateFailedAt < REMIX_BACKOFF_NS)
+            return
+        // Moving the Canvas inside the window's modal move loop ends the drag; place it once the button is released.
+        if (embedding.isMouseButtonDown())
+            return
+        val expected = placeholder.locationOnScreen.apply { translate(canvas.x, canvas.y) }
+        fun misplaced(): Boolean {
+            val actual = canvas.locationOnScreen
+            // Device pixels round to user space differently along the two paths.
+            return abs(actual.x - expected.x) > LOCATION_TOLERANCE || abs(actual.y - expected.y) > LOCATION_TOLERANCE
+        }
+        if (!misplaced())
+            return
+        LOG.info("$resPath: canvas at ${canvas.locationOnScreen} instead of $expected, relocating")
+        val (x, y) = canvas.x to canvas.y
+        canvas.setLocation(x + 1, y)
+        canvas.setLocation(x, y)
+        relocateFailedAt = if (misplaced()) System.nanoTime() else 0L
     }
 
     /**
@@ -486,6 +515,7 @@ class SceneViewportEditor(
         const val UI_FROZEN_NS = 5_000_000_000L
         const val REMIX_BACKOFF_NS = 1_000_000_000L
         const val WATCH_AFTER_STEP_IN_NS = 600_000_000L
+        const val LOCATION_TOLERANCE = 2
         val DEBUG = System.getenv("MUSH_DEBUG") == "1"
         val LOG = logger<SceneViewportEditor>()
 
